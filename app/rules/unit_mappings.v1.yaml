@@ -1,0 +1,79 @@
+version: poc-v1
+rules:
+  - rule_id: GM_IDENTITY
+    source_uoms: [GM]
+    target_uom: GM
+    operation: MULTIPLY
+    factor: "1"
+    enabled: true
+    notes: Existing base-weight value copied into blank standardized fields.
+  - rule_id: ML_IDENTITY
+    source_uoms: [ML]
+    target_uom: ML
+    operation: MULTIPLY
+    factor: "1"
+    enabled: true
+    notes: Existing base-volume value copied into blank standardized fields.
+  - rule_id: EA_IDENTITY
+    source_uoms: [EA]
+    target_uom: EA
+    operation: MULTIPLY
+    factor: "1"
+    enabled: true
+    notes: Existing each value copied into blank standardized fields.
+  - rule_id: FT_IDENTITY
+    source_uoms: [FT]
+    target_uom: FT
+    operation: MULTIPLY
+    factor: "1"
+    enabled: true
+    notes: Existing base-length value copied into blank standardized fields.
+  - rule_id: KG_TO_GM
+    source_uoms: [KG]
+    target_uom: GM
+    operation: MULTIPLY
+    factor: "1000"
+    enabled: true
+    notes: Standard metric conversion.
+  - rule_id: G_TO_GM
+    source_uoms: [G]
+    target_uom: GM
+    operation: MULTIPLY
+    factor: "1"
+    enabled: true
+    notes: Gram alias normalization.
+  - rule_id: OZ_TO_GM
+    source_uoms: [OZ]
+    target_uom: GM
+    operation: MULTIPLY
+    factor: "28.349523125"
+    enabled: true
+    notes: International avoirdupois ounce; rounding policy remains configurable.
+  - rule_id: LB_TO_GM
+    source_uoms: [LB]
+    target_uom: GM
+    operation: MULTIPLY
+    factor: "453.59237"
+    enabled: true
+    notes: International avoirdupois pound; rounding policy remains configurable.
+  - rule_id: LT_TO_ML
+    source_uoms: [LT, L]
+    target_uom: ML
+    operation: MULTIPLY
+    factor: "1000"
+    enabled: true
+    notes: Litre aliases to millilitres.
+  - rule_id: PIECE_TO_EA
+    source_uoms: [PC]
+    target_uom: EA
+    operation: MULTIPLY
+    factor: "1"
+    enabled: true
+    notes: Confirmed piece-to-each normalization.
+  - rule_id: PACK_TO_EA
+    source_uoms: [PK, PACK]
+    target_uom: EA
+    operation: MULTIPLY
+    factor: "1"
+    enabled: true
+    notes: O-4 closed; container units become EA.
