@@ -1,5 +1,6 @@
 from fastapi import Request
 
+from app.agents.chat_coordinator import ChatCoordinator
 from app.repositories.mongo import MongoRepositories
 from app.services.export_service import ExportService
 from app.services.processor import JobProcessor
@@ -20,3 +21,7 @@ def processor(request: Request) -> JobProcessor:
 
 def exporter(request: Request) -> ExportService:
     return request.app.state.exporter
+
+
+def chat_coordinator(request: Request) -> ChatCoordinator:
+    return request.app.state.chat_coordinator

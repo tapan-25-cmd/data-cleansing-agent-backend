@@ -3,8 +3,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.agents.chat_coordinator import ChatCoordinator
 from app.agents.factory import create_inference_provider
-from app.api import export, jobs, review
+from app.api import chat, export, jobs, review
 from app.config import get_settings
 from app.repositories.mongo import MongoRepositories
 from app.rules.registry import load_default_registry
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
         settings.ai_max_concurrency,
     )
     app.state.exporter = ExportService(repositories, file_storage)
+    app.state.chat_coordinator = ChatCoordinator()
     yield
     repositories.close()
 
@@ -48,6 +50,7 @@ app.add_middleware(
 app.include_router(jobs.router, prefix=settings.api_prefix)
 app.include_router(review.router, prefix=settings.api_prefix)
 app.include_router(export.router, prefix=settings.api_prefix)
+app.include_router(chat.router, prefix=settings.api_prefix)
 
 
 @app.get("/health")

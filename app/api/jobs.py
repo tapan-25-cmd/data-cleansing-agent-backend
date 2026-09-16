@@ -119,6 +119,22 @@ def list_items(
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
+@router.get("/{job_id}/preview")
+def preview_items(
+    job_id: str,
+    repos: Annotated[MongoRepositories, Depends(repositories)],
+    limit: Annotated[int, Query(ge=3, le=30)] = 9,
+) -> dict:
+    if not repos.get_job(job_id):
+        raise HTTPException(404, "Job not found")
+    per_group = max(1, limit // 3)
+    items: list[dict] = []
+    for group in ("A", "B", "C"):
+        rows, _ = repos.list_items(job_id, {"group": group}, 0, per_group)
+        items.extend(rows)
+    return {"items": items[:limit]}
+
+
 @router.get("/{job_id}/conversion-groups")
 def conversion_groups(job_id: str, repos: Annotated[MongoRepositories, Depends(repositories)]) -> dict:
     if not repos.get_job(job_id):
