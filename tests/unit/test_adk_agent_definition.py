@@ -9,7 +9,7 @@ def test_real_agent_is_isolated_structured_and_tool_free():
             _env_file=None,
             ai_provider="adk",
             gemini_api_key="test-api-key",
-            gemini_model="gemini-2.5-flash",
+            gemini_model="gemini-3.6-flash",
         )
     )
     assert bundle.agent.name == AGENT_NAME

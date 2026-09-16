@@ -56,7 +56,7 @@ async def test_adk_provider_uses_fresh_sessions_and_validates_final_event():
             _env_file=None,
             ai_provider="adk",
             gemini_api_key="test-api-key",
-            gemini_model="gemini-2.5-flash",
+            gemini_model="gemini-3.6-flash",
         )
     )
     provider = AdkInferenceProvider(bundle)

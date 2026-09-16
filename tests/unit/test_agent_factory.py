@@ -34,7 +34,7 @@ def test_factory_builds_real_adk_provider_with_api_key():
         settings(
             ai_provider="adk",
             gemini_api_key="test-api-key",
-            gemini_model="gemini-2.5-flash",
+            gemini_model="gemini-3.6-flash",
         )
     )
 
