@@ -45,6 +45,12 @@ def test_export_applies_pending_proposals_without_rebuilding_workbook(tmp_path):
     row[headers.index(FIELD_MAP["standard_uom"])] = "KG"
     row[headers.index(FIELD_MAP["standard_pack_size"])] = 1
     sheet.append(row)
+    validated_row = [None] * len(headers)
+    validated_row[headers.index(FIELD_MAP["item_no"])] = "SKU-A"
+    validated_row[headers.index(FIELD_MAP["standard_size"])] = 500.5
+    validated_row[headers.index(FIELD_MAP["standard_uom"])] = "ML"
+    validated_row[headers.index(FIELD_MAP["standard_pack_size"])] = 1
+    sheet.append(validated_row)
     source = BytesIO()
     workbook.save(source)
     source.seek(0)
@@ -63,6 +69,11 @@ def test_export_applies_pending_proposals_without_rebuilding_workbook(tmp_path):
     assert output_sheet.cell(2, output_headers[FIELD_MAP["standard_size"]]).value == 1000
     assert output_sheet.cell(2, output_headers[FIELD_MAP["standard_uom"]]).value == "GM"
     assert output_sheet.cell(2, output_headers[FIELD_MAP["standard_pack_size"]]).value == 2
+    # Export patches only proposal rows. A validated Group A row remains byte-for-byte
+    # equivalent at the cell-value level, including its existing decimal size.
+    assert output_sheet.cell(3, output_headers[FIELD_MAP["standard_size"]]).value == 500.5
+    assert output_sheet.cell(3, output_headers[FIELD_MAP["standard_uom"]]).value == "ML"
+    assert output_sheet.cell(3, output_headers[FIELD_MAP["standard_pack_size"]]).value == 1
     assert result.sheetnames == [INPUT_SHEET]
     result.close()
     assert repositories.job["status"] == "EXPORTED"

@@ -35,4 +35,5 @@ class RuleEngine:
             source_value=value,
             raw_target=raw_target,
             final_target=final_target,
+            rounding_decimals=places,
         )

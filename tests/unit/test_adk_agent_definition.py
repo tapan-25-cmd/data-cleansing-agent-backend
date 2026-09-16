@@ -27,6 +27,8 @@ def test_prompt_is_versioned_and_forbids_conversion():
     prompt, checksum = load_prompt()
     assert "Do not convert units" in prompt
     assert "Do not browse" in prompt
+    assert "PACK_ONLY" in prompt
+    assert "loose piece/content count" in prompt
     assert len(checksum) == 64
 
 

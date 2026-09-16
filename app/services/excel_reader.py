@@ -89,7 +89,10 @@ def _domain_number(value: Any) -> Decimal | str | None:
 class ExcelReader:
     def iter_rows(self, path: Path) -> Iterator[WorkbookRow]:
         try:
-            workbook = load_workbook(path, read_only=True, data_only=True)
+            # Read formulas as formulas. Standardized K/L/M inputs must be fixed
+            # values; the Group A validator rejects formulas explicitly instead of
+            # silently trusting a cached result.
+            workbook = load_workbook(path, read_only=True, data_only=False)
         except Exception as exc:
             raise WorkbookValidationError(f"Workbook cannot be opened: {exc}") from exc
         if INPUT_SHEET not in workbook.sheetnames:
@@ -127,6 +130,9 @@ class ExcelReader:
                     section=clean_text(raw.get(FIELD_MAP["section"])),
                     legacy_size=_domain_number(raw.get(FIELD_MAP["legacy_size"])),
                     legacy_uom=clean_uom(raw.get(FIELD_MAP["legacy_uom"])),
+                    raw_standard_size=raw.get(FIELD_MAP["standard_size"]),
+                    raw_standard_uom=raw.get(FIELD_MAP["standard_uom"]),
+                    raw_standard_pack_size=raw.get(FIELD_MAP["standard_pack_size"]),
                     standard_size=_domain_number(raw.get(FIELD_MAP["standard_size"])),
                     standard_uom=clean_uom(raw.get(FIELD_MAP["standard_uom"])),
                     standard_pack_size=_domain_number(raw.get(FIELD_MAP["standard_pack_size"])),

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from collections import Counter
+from decimal import Decimal
+from time import perf_counter
 from typing import Any
 
 from app.agents.provider import (
@@ -17,9 +21,25 @@ from app.rules.registry import RuleRegistry
 from app.services.classifier import classify
 from app.services.discrepancy_service import find_discrepancies
 from app.services.excel_reader import ExcelReader, WorkbookRow
+from app.services.group_a_validator import (
+    GROUP_A_VALIDATION_VERSION,
+    STANDARD_UOM_ALIAS_CHECKSUM,
+    STANDARD_UOM_ALIAS_VERSION,
+    GroupAValidationResult,
+    GroupAValidationStatus,
+    GroupAValidator,
+)
+from app.services.pack_size_service import (
+    PACK_EXTRACTION_VERSION,
+    PackAssessment,
+    PackSizeService,
+    PackStatus,
+)
 from app.services.purge_detector import is_purged
 from app.services.rule_engine import RuleEngine
 from app.storage.local import LocalFileStorage
+
+logger = logging.getLogger(__name__)
 
 
 EXPECTED_V02 = {
@@ -29,9 +49,17 @@ EXPECTED_V02 = {
     "live": 12542,
     "group_a": 11975,
     "group_b": 512,
+    "group_b1": 304,
+    "group_b2": 170,
+    "group_b3": 38,
     "group_c": 55,
+    "validation_review": 0,
     "data_shape_error": 0,
 }
+
+
+def _log_event(event: str, **fields: object) -> None:
+    logger.info(json.dumps({"event": event, **fields}, default=str, separators=(",", ":")))
 
 
 def _json_value(value: object) -> object:
@@ -42,9 +70,21 @@ def _json_value(value: object) -> object:
 
 def _original(product: InputProduct) -> dict[str, object]:
     return {
-        "standard_size": _json_value(product.standard_size),
-        "standard_uom": product.standard_uom,
-        "standard_pack_size": _json_value(product.standard_pack_size),
+        "standard_size": _json_value(
+            product.raw_standard_size
+            if product.raw_standard_size is not None
+            else product.standard_size
+        ),
+        "standard_uom": _json_value(
+            product.raw_standard_uom
+            if product.raw_standard_uom is not None
+            else product.standard_uom
+        ),
+        "standard_pack_size": _json_value(
+            product.raw_standard_pack_size
+            if product.raw_standard_pack_size is not None
+            else product.standard_pack_size
+        ),
         "legacy_size": _json_value(product.legacy_size),
         "legacy_uom": product.legacy_uom,
     }
@@ -74,14 +114,22 @@ class JobProcessor:
         inference_provider: InferenceProvider,
         default_rounding_decimals: int | None = None,
         ai_max_concurrency: int = 5,
+        pack_size_inference_enabled: bool = True,
     ):
         self.repositories = repositories
         self.storage = storage
         self.registry = registry
         self.inference_provider = inference_provider
         self.reader = ExcelReader()
+        # Actual Group B unit conversions follow the agreed Excel-style
+        # nearest-whole policy. B3 cleanup preserves existing numeric values.
+        # Group C retains its independent policy through the regular engine.
+        self.group_b_rule_engine = RuleEngine(registry, 0)
         self.rule_engine = RuleEngine(registry, default_rounding_decimals)
+        self.group_a_validator = GroupAValidator(self.group_b_rule_engine)
+        self.pack_size_service = PackSizeService()
         self.ai_max_concurrency = ai_max_concurrency
+        self.pack_size_inference_enabled = pack_size_inference_enabled
 
     def process(self, job_id: str) -> None:
         try:
@@ -97,6 +145,8 @@ class JobProcessor:
         if not job:
             raise ValueError("job not found")
         selected = set(job["selected_departments"])
+        started = perf_counter()
+        _log_event("job.processing_started", job_id=job_id, selected_departments=sorted(selected))
         self.repositories.update_job(job_id, {
             "status": "PROCESSING", "progress.stage": "PROFILING", "error": None
         })
@@ -105,45 +155,172 @@ class JobProcessor:
         source_counts: Counter[str] = Counter()
         items: list[dict[str, Any]] = []
         group_c: list[tuple[int, InputProduct]] = []
+        group_b_pack_candidates: list[tuple[int, InputProduct, Decimal | str | None, str | None]] = []
+        selected_rows: list[WorkbookRow] = []
         for workbook_row in self.reader.iter_rows(self.storage.get_input_path(job_id)):
             counts["workbook_rows"] += 1
             product = workbook_row.product
             if product.department not in selected:
                 continue
             counts["department_rows"] += 1
+            selected_rows.append(workbook_row)
+
+        item_number_counts = Counter(
+            row.product.item_no for row in selected_rows if row.product.item_no
+        )
+        for workbook_row in selected_rows:
+            product = workbook_row.product
             purged = is_purged(workbook_row.raw)
             group = classify(product, purged=purged)
+            validation: GroupAValidationResult | None = None
+            if not purged:
+                validation = self.group_a_validator.validate(
+                    workbook_row,
+                    duplicate_item_number=(
+                        bool(product.item_no)
+                        and item_number_counts[product.item_no] > 1
+                    ),
+                )
+                if validation is not None:
+                    if validation.status == GroupAValidationStatus.VALID:
+                        group = WorkGroup.A
+                    elif validation.status == GroupAValidationStatus.AUTO_FIX:
+                        group = WorkGroup.B
+                    elif validation.status == GroupAValidationStatus.REVIEW:
+                        group = WorkGroup.VALIDATION_REVIEW
+                    else:
+                        group = WorkGroup.DATA_SHAPE_ERROR
             if purged:
                 counts["purged"] += 1
             else:
                 counts["live"] += 1
             counts[f"group_{group.value.lower()}"] += 1
-            item = self._base_item(job_id, workbook_row, group)
+            if validation and validation.has_warnings and group == WorkGroup.A:
+                counts["group_a_validation_warnings"] += 1
+            item = self._base_item(job_id, workbook_row, group, validation)
 
             if group == WorkGroup.B:
-                subtype = "B2" if product.standard_size is None and product.standard_uom is None else "B1"
-                counts[f"group_{subtype.lower()}"] += 1
-                source_uom = product.legacy_uom
-                if source_uom:
-                    source_counts[source_uom] += 1
-                proposal = self.rule_engine.propose(product.legacy_size, source_uom)
-                if proposal:
-                    item["field_proposals"].update({
-                        "standard_size": str(proposal.standard_size),
-                        "standard_uom": proposal.standard_uom,
-                    })
-                    item["method"] = ProposalMethod.RULE.value
-                    item["reason_code"] = "RULE_CONVERSION"
-                    item["rule"] = proposal.model_dump(mode="json")
+                if validation and validation.status == GroupAValidationStatus.AUTO_FIX:
+                    subtype = "B3"
                 else:
-                    item["reason_code"] = "NO_RULE" if self.registry.get(source_uom) is None else "MALFORMED_VALUE"
-                item["review"] = self._pending_review(size_uom=True)
+                    subtype = "B2" if product.standard_size is None and product.standard_uom is None else "B1"
+                counts[f"group_{subtype.lower()}"] += 1
+                if subtype == "B3":
+                    normalized = validation.normalization_proposal()
+                    size_requires_fix = any(
+                        issue.field == "standard_size"
+                        and issue.code == "NUMERIC_TEXT_NORMALIZATION"
+                        for issue in validation.issues
+                    )
+                    uom_requires_fix = any(
+                        issue.field == "standard_uom"
+                        and issue.code == "UOM_CANONICALIZATION"
+                        for issue in validation.issues
+                    )
+                    pack_requires_fix = any(
+                        issue.field == "standard_pack_size"
+                        and issue.code == "NUMERIC_TEXT_NORMALIZATION"
+                        for issue in validation.issues
+                    )
+                    if size_requires_fix:
+                        item["field_proposals"]["standard_size"] = normalized["standard_size"]
+                        item["field_provenance"]["standard_size"] = self._rule_provenance(
+                            "STANDARD_FIELDS_CANONICALIZATION"
+                        )
+                    if uom_requires_fix:
+                        item["field_proposals"]["standard_uom"] = normalized["standard_uom"]
+                        item["field_provenance"]["standard_uom"] = self._rule_provenance(
+                            "STANDARD_FIELDS_CANONICALIZATION"
+                        )
+                    if pack_requires_fix:
+                        item["field_proposals"]["standard_pack_size"] = normalized["standard_pack_size"]
+                    item["method"] = ProposalMethod.RULE.value
+                    item["reason_code"] = "STANDARD_FIELDS_NORMALIZATION"
+                    item["rule"] = {
+                        "rule_id": "STANDARD_FIELDS_CANONICALIZATION",
+                        "factor": "1",
+                        "source_uom": _json_value(product.raw_standard_uom),
+                        "target_uom": validation.standard_uom,
+                        "source_value": str(validation.standard_size),
+                        "raw_target": str(validation.standard_size),
+                        "final_target": normalized["standard_size"],
+                        "rounding_decimals": None,
+                    }
+                    item["review"] = self._pending_review(
+                        size_uom=size_requires_fix or uom_requires_fix,
+                        pack=pack_requires_fix,
+                    )
+                else:
+                    source_uom = product.legacy_uom
+                    if source_uom:
+                        source_counts[source_uom] += 1
+                    proposal = self.group_b_rule_engine.propose(product.legacy_size, source_uom)
+                    if proposal:
+                        item["field_proposals"].update({
+                            "standard_size": str(proposal.standard_size),
+                            "standard_uom": proposal.standard_uom,
+                        })
+                        item["method"] = ProposalMethod.RULE.value
+                        item["reason_code"] = "RULE_CONVERSION"
+                        item["rule"] = proposal.model_dump(mode="json")
+                        item["field_provenance"]["standard_size"] = self._rule_provenance(proposal.rule_id)
+                        item["field_provenance"]["standard_uom"] = self._rule_provenance(proposal.rule_id)
+                    else:
+                        item["reason_code"] = "NO_RULE" if self.registry.get(source_uom) is None else "MALFORMED_VALUE"
+                    item["review"] = self._pending_review(size_uom=True)
+                pack_assessment = self.pack_size_service.assess(product)
+                self._apply_pack_assessment(item, pack_assessment)
+                if pack_assessment.status == PackStatus.NEEDS_AGENT:
+                    if self.pack_size_inference_enabled:
+                        effective_size = item["field_proposals"].get("standard_size") or product.standard_size
+                        effective_uom = item["field_proposals"].get("standard_uom") or product.standard_uom
+                        group_b_pack_candidates.append(
+                            (len(items), product, effective_size, effective_uom)
+                        )
+                    else:
+                        item["pack_result"]["status"] = "AGENT_DISABLED"
+                        item["pack_result"]["reason_code"] = "PACK_AGENT_DISABLED"
+                _log_event(
+                    "item.rule_processed",
+                    job_id=job_id,
+                    item_no=product.item_no,
+                    row_number=workbook_row.row_number,
+                    group=group.value,
+                    source_uom=(
+                        product.raw_standard_uom if subtype == "B3" else product.legacy_uom
+                    ),
+                    subtype=subtype,
+                    reason_code=item["reason_code"],
+                    rule_id=item["rule"].get("rule_id"),
+                )
             elif group == WorkGroup.C:
                 group_c.append((len(items), product))
                 item["review"] = self._pending_review(size_uom=True)
+                self._apply_pack_assessment(item, self.pack_size_service.assess(product))
+                if (
+                    not self.pack_size_inference_enabled
+                    and item["pack_result"]["status"] == PackStatus.NEEDS_AGENT.value
+                ):
+                    item["pack_result"]["status"] = "AGENT_DISABLED"
+                    item["pack_result"]["reason_code"] = "PACK_AGENT_DISABLED"
+                _log_event(
+                    "item.inference_queued",
+                    job_id=job_id,
+                    item_no=product.item_no,
+                    row_number=workbook_row.row_number,
+                    group=group.value,
+                )
+            elif group == WorkGroup.VALIDATION_REVIEW:
+                item["reason_code"] = "GROUP_A_VALIDATION_REVIEW"
+                item["review"] = self._pending_review(size_uom=True, pack=True)
+            elif group == WorkGroup.DATA_SHAPE_ERROR and validation is not None:
+                item["reason_code"] = "GROUP_A_VALIDATION_INVALID"
+                item["review"] = self._pending_review(size_uom=True, pack=True)
             items.append(item)
 
         self.repositories.update_job(job_id, {"progress.stage": "PROCESSING_DESCRIPTIONS"})
+        if group_b_pack_candidates:
+            asyncio.run(self._infer_group_b_pack(items, group_b_pack_candidates))
         if group_c:
             asyncio.run(self._infer_group_c(items, group_c))
 
@@ -153,6 +330,14 @@ class JobProcessor:
             if item["discrepancy"]["flagged"]:
                 discrepancies += 1
         counts["discrepancies"] = discrepancies
+        for item in items:
+            pack_result = item.get("pack_result") or {}
+            status = str(pack_result.get("status") or "NOT_EVALUATED").lower()
+            counts[f"pack_{status}"] += 1
+            if pack_result.get("invalid_existing"):
+                counts["pack_invalid_existing"] += 1
+            if item["group"] in {WorkGroup.B.value, WorkGroup.C.value}:
+                counts[f"group_{item['group'].lower()}_pack_{status}"] += 1
         stats = {
             "workbook_rows": counts["workbook_rows"],
             "department_rows": counts["department_rows"],
@@ -162,9 +347,26 @@ class JobProcessor:
             "group_b": counts["group_b"],
             "group_b1": counts["group_b1"],
             "group_b2": counts["group_b2"],
+            "group_b3": counts["group_b3"],
             "group_c": counts["group_c"],
+            "validation_review": counts["group_validation_review"],
+            "group_a_validation_warnings": counts["group_a_validation_warnings"],
             "data_shape_error": counts["group_data_shape_error"],
             "discrepancies": discrepancies,
+            "pack_existing_valid": counts["pack_existing_valid"],
+            "pack_normalized_existing": counts["pack_normalize_existing"],
+            "pack_deterministic_proposed": counts["pack_deterministic_proposal"],
+            "pack_agent_proposed": counts["pack_agent_proposal"],
+            "pack_agent_declined": counts["pack_agent_declined"],
+            "pack_conflict": counts["pack_conflict"],
+            "pack_not_found": counts["pack_not_found"],
+            "pack_agent_error": counts["pack_agent_error"],
+            "pack_agent_disabled": counts["pack_agent_disabled"],
+            "pack_invalid_existing": counts["pack_invalid_existing"],
+            "group_b_pack_deterministic_proposed": counts["group_b_pack_deterministic_proposal"],
+            "group_b_pack_agent_proposed": counts["group_b_pack_agent_proposal"],
+            "group_c_pack_deterministic_proposed": counts["group_c_pack_deterministic_proposal"],
+            "group_c_pack_agent_proposed": counts["group_c_pack_agent_proposal"],
         }
         if job.get("snapshot_label") == "v0.2":
             differences = {key: (stats[key], expected) for key, expected in EXPECTED_V02.items() if stats[key] != expected}
@@ -185,14 +387,34 @@ class JobProcessor:
         self.repositories.update_job(job_id, {
             "status": "READY_FOR_REVIEW",
             "stats": stats,
+            "validation_policy": {
+                "version": GROUP_A_VALIDATION_VERSION,
+                "alias_version": STANDARD_UOM_ALIAS_VERSION,
+                "alias_checksum": STANDARD_UOM_ALIAS_CHECKSUM,
+                "group_b_rounding": "EXCEL_NEAREST_WHOLE",
+                "pack_extraction_version": PACK_EXTRACTION_VERSION,
+                "pack_agent_fallback_enabled": self.pack_size_inference_enabled,
+            },
             "rule_readiness": readiness,
             "progress": {
                 "stage": "READY_FOR_REVIEW", "processed": stats["live"],
                 "total": stats["live"], "percent": 100,
             },
         })
+        _log_event(
+            "job.processing_completed",
+            job_id=job_id,
+            duration_ms=round((perf_counter() - started) * 1000),
+            **stats,
+        )
 
-    def _base_item(self, job_id: str, row: WorkbookRow, group: WorkGroup) -> dict[str, Any]:
+    def _base_item(
+        self,
+        job_id: str,
+        row: WorkbookRow,
+        group: WorkGroup,
+        validation: GroupAValidationResult | None = None,
+    ) -> dict[str, Any]:
         details = [] if group == WorkGroup.SKIPPED_PURGED else find_discrepancies(row.product)
         return {
             "job_id": job_id,
@@ -204,10 +426,17 @@ class JobProcessor:
             "original": _original(row.product),
             "field_proposals": {"standard_size": None, "standard_uom": None, "standard_pack_size": None},
             "method": ProposalMethod.NONE.value,
-            "reason_code": "ALREADY_BASE_UNIT" if group == WorkGroup.A else None,
+            "reason_code": "VALIDATED_BASE_UNIT" if group == WorkGroup.A else None,
             "rule": {"rule_id": None, "factor": None, "source_uom": None, "target_uom": None},
+            "field_provenance": {
+                "standard_size": {"method": "EXISTING" if group == WorkGroup.A else "NONE"},
+                "standard_uom": {"method": "EXISTING" if group == WorkGroup.A else "NONE"},
+                "standard_pack_size": {"method": "EXISTING" if group == WorkGroup.A else "NONE"},
+            },
+            "pack_result": None,
             "evidence": [],
             "confidence": None,
+            "validation": validation.as_dict() if validation else None,
             "discrepancy": {"flagged": bool(details), "details": details},
             "review": self._not_required_review(),
         }
@@ -220,20 +449,133 @@ class JobProcessor:
         }
 
     @staticmethod
-    def _pending_review(size_uom: bool) -> dict[str, Any]:
+    def _pending_review(size_uom: bool, pack: bool = False) -> dict[str, Any]:
         return {
             "field_decisions": {
                 "standard_size": "PENDING" if size_uom else "NOT_REQUIRED",
                 "standard_uom": "PENDING" if size_uom else "NOT_REQUIRED",
-                "standard_pack_size": "NOT_REQUIRED",
+                "standard_pack_size": "PENDING" if pack else "NOT_REQUIRED",
             },
             "overall_status": "PENDING", "override_values": None, "comment": None,
         }
+
+    @staticmethod
+    def _rule_provenance(rule_id: str) -> dict[str, str]:
+        return {"method": ProposalMethod.RULE.value, "rule_id": rule_id}
+
+    def _apply_pack_assessment(self, item: dict[str, Any], assessment: PackAssessment) -> None:
+        item["pack_result"] = assessment.as_dict()
+        if assessment.status == PackStatus.EXISTING_VALID:
+            item["field_provenance"]["standard_pack_size"] = {"method": "EXISTING"}
+            return
+        if assessment.status not in {
+            PackStatus.NORMALIZE_EXISTING,
+            PackStatus.DETERMINISTIC_PROPOSAL,
+        }:
+            return
+        if assessment.pack_size is None:
+            return
+        item["field_proposals"]["standard_pack_size"] = str(
+            assessment.pack_size.quantize(Decimal("1"))
+        )
+        item["field_provenance"]["standard_pack_size"] = {
+            "method": ProposalMethod.RULE.value,
+            "rule_id": assessment.pattern_id or "PACK_VALUE_NORMALIZATION",
+            "evidence": assessment.evidence.model_dump() if assessment.evidence else None,
+        }
+        if assessment.evidence:
+            item["evidence"].append(assessment.evidence.model_dump())
+        if item["method"] == ProposalMethod.NONE.value:
+            item["method"] = ProposalMethod.RULE.value
+        item["review"]["field_decisions"]["standard_pack_size"] = "PENDING"
+
+    async def _infer_group_b_pack(
+        self,
+        items: list[dict[str, Any]],
+        candidates: list[tuple[int, InputProduct, Decimal | str | None, str | None]],
+    ) -> None:
+        semaphore = asyncio.Semaphore(self.ai_max_concurrency)
+
+        async def infer(
+            index: int,
+            product: InputProduct,
+            standard_size: Decimal | str | None,
+            standard_uom: str | None,
+        ) -> None:
+            request = self.pack_size_service.agent_request(
+                product, standard_size, standard_uom
+            )
+            started = perf_counter()
+            try:
+                _log_event(
+                    "item.pack_inference_started",
+                    job_id=items[index]["job_id"],
+                    item_no=product.item_no,
+                    row_number=items[index]["row_number"],
+                    group=items[index]["group"],
+                )
+                async with semaphore:
+                    response = await self.inference_provider.infer(request)
+                result = response.result
+                validate_evidence(request, result)
+                item = items[index]
+                if result.status == "PACK_PROPOSAL" and result.pack_size is not None:
+                    item["field_proposals"]["standard_pack_size"] = str(
+                        result.pack_size.quantize(Decimal("1"))
+                    )
+                    item["review"]["field_decisions"]["standard_pack_size"] = "PENDING"
+                    item["pack_result"] = {
+                        "version": PACK_EXTRACTION_VERSION,
+                        "status": "AGENT_PROPOSAL",
+                        "reason_code": result.reason_code,
+                        "pack_size": str(result.pack_size.quantize(Decimal("1"))),
+                        "evidence": result.pack_evidence.model_dump(),
+                        "invalid_existing": item["pack_result"].get("invalid_existing", False),
+                    }
+                    item["field_provenance"]["standard_pack_size"] = {
+                        "method": ProposalMethod.AI_INFERENCE.value,
+                        "evidence": result.pack_evidence.model_dump(),
+                        "confidence": result.confidence,
+                        "provider": response.metadata.model_dump(mode="json"),
+                    }
+                    item["evidence"].append(result.pack_evidence.model_dump())
+                else:
+                    item["pack_result"]["status"] = "AGENT_DECLINED"
+                    item["pack_result"]["reason_code"] = result.reason_code
+                _log_event(
+                    "item.pack_inference_completed",
+                    job_id=item["job_id"],
+                    item_no=product.item_no,
+                    row_number=item["row_number"],
+                    status=result.status,
+                    reason_code=result.reason_code,
+                    duration_ms=round((perf_counter() - started) * 1000),
+                )
+            except Exception as exc:
+                item = items[index]
+                item["pack_result"]["status"] = "AGENT_ERROR"
+                item["pack_result"]["reason_code"] = "PACK_AGENT_ERROR"
+                item["pack_result"]["error"] = f"{type(exc).__name__}: {exc}"
+                _log_event(
+                    "item.pack_inference_failed",
+                    job_id=item["job_id"],
+                    item_no=product.item_no,
+                    row_number=item["row_number"],
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    duration_ms=round((perf_counter() - started) * 1000),
+                )
+
+        await asyncio.gather(*(
+            infer(index, product, standard_size, standard_uom)
+            for index, product, standard_size, standard_uom in candidates
+        ))
 
     async def _infer_group_c(self, items: list[dict[str, Any]], candidates: list[tuple[int, InputProduct]]) -> None:
         semaphore = asyncio.Semaphore(self.ai_max_concurrency)
 
         async def infer(index: int, product: InputProduct) -> None:
+            started = perf_counter()
             request = InferenceRequest(
                 item_brand_eng=product.item_brand_eng,
                 item_brand_local_lang=product.item_brand_local,
@@ -243,6 +585,13 @@ class JobProcessor:
                 web_description_chi=product.web_description_chi,
             )
             try:
+                _log_event(
+                    "item.inference_started",
+                    job_id=items[index]["job_id"],
+                    item_no=product.item_no,
+                    row_number=items[index]["row_number"],
+                    group=items[index]["group"],
+                )
                 async with semaphore:
                     response = await self.inference_provider.infer(request)
                 result = response.result
@@ -256,12 +605,10 @@ class JobProcessor:
                 if result.measurement:
                     observations.append(result.measurement)
                 observations.extend(result.conflicting_measurements)
-                item["evidence"] = [
+                item["evidence"].extend([
                     {"field": observed.field, "fragment": observed.fragment}
                     for observed in observations
-                ]
-                if result.pack_evidence:
-                    item["evidence"].append(result.pack_evidence.model_dump())
+                ])
                 if result.status == "PROPOSAL" and result.measurement:
                     item["ai_observation"] = result.measurement.model_dump(mode="json")
                     proposal = self.rule_engine.propose(
@@ -280,17 +627,115 @@ class JobProcessor:
                             "standard_uom": proposal.standard_uom,
                         })
                         item["rule"] = proposal.model_dump(mode="json")
-                    if result.pack_size is not None:
-                        item["field_proposals"]["standard_pack_size"] = str(result.pack_size)
+                        shared_provenance = {
+                            "method": "AI_INFERENCE+RULE",
+                            "rule_id": proposal.rule_id,
+                            "evidence": result.measurement.model_dump(mode="json"),
+                            "provider": response.metadata.model_dump(mode="json"),
+                        }
+                        item["field_provenance"]["standard_size"] = shared_provenance
+                        item["field_provenance"]["standard_uom"] = shared_provenance
+                    pack_status = (item.get("pack_result") or {}).get("status")
+                    if (
+                        self.pack_size_inference_enabled
+                        and result.pack_size is not None
+                        and pack_status in {
+                            PackStatus.NEEDS_AGENT.value,
+                            PackStatus.NOT_FOUND.value,
+                        }
+                    ):
+                        item["field_proposals"]["standard_pack_size"] = str(
+                            result.pack_size.quantize(Decimal("1"))
+                        )
                         item["review"]["field_decisions"]["standard_pack_size"] = "PENDING"
+                        item["pack_result"] = {
+                            "version": PACK_EXTRACTION_VERSION,
+                            "status": "AGENT_PROPOSAL",
+                            "reason_code": "EXPLICIT_PACK_COUNT",
+                            "pack_size": str(result.pack_size.quantize(Decimal("1"))),
+                            "evidence": result.pack_evidence.model_dump(),
+                            "invalid_existing": item["pack_result"].get("invalid_existing", False),
+                        }
+                        item["field_provenance"]["standard_pack_size"] = {
+                            "method": ProposalMethod.AI_INFERENCE.value,
+                            "evidence": result.pack_evidence.model_dump(),
+                            "confidence": result.confidence,
+                            "provider": response.metadata.model_dump(mode="json"),
+                        }
+                        item["evidence"].append(result.pack_evidence.model_dump())
+                pack_status = (item.get("pack_result") or {}).get("status")
+                if (
+                    self.pack_size_inference_enabled
+                    and result.pack_size is None
+                    and pack_status in {
+                        PackStatus.NEEDS_AGENT.value,
+                        PackStatus.NOT_FOUND.value,
+                    }
+                ):
+                    item["pack_result"]["status"] = "AGENT_DECLINED"
+                    item["pack_result"]["reason_code"] = "PACK_SIZE_NOT_PROPOSED"
+                _log_event(
+                    "item.inference_completed",
+                    job_id=item["job_id"],
+                    item_no=product.item_no,
+                    row_number=item["row_number"],
+                    group=item["group"],
+                    status=result.status,
+                    reason_code=item["reason_code"],
+                    model_id=response.metadata.model_id,
+                    latency_ms=response.metadata.latency_ms,
+                    duration_ms=round((perf_counter() - started) * 1000),
+                )
             except InvalidInferenceResponseError as exc:
                 items[index]["reason_code"] = "AI_INVALID_RESPONSE"
                 items[index]["ai_error"] = str(exc)
+                if (items[index].get("pack_result") or {}).get("status") in {
+                    PackStatus.NEEDS_AGENT.value, PackStatus.NOT_FOUND.value,
+                }:
+                    items[index]["pack_result"]["status"] = "AGENT_ERROR"
+                    items[index]["pack_result"]["reason_code"] = "PACK_AGENT_ERROR"
+                _log_event(
+                    "item.inference_failed",
+                    job_id=items[index]["job_id"],
+                    item_no=product.item_no,
+                    row_number=items[index]["row_number"],
+                    reason_code="AI_INVALID_RESPONSE",
+                    error=str(exc),
+                    duration_ms=round((perf_counter() - started) * 1000),
+                )
             except ValueError as exc:
                 items[index]["reason_code"] = "AI_INVALID_RESPONSE"
                 items[index]["ai_error"] = str(exc)
+                if (items[index].get("pack_result") or {}).get("status") in {
+                    PackStatus.NEEDS_AGENT.value, PackStatus.NOT_FOUND.value,
+                }:
+                    items[index]["pack_result"]["status"] = "AGENT_ERROR"
+                    items[index]["pack_result"]["reason_code"] = "PACK_AGENT_ERROR"
+                _log_event(
+                    "item.inference_failed",
+                    job_id=items[index]["job_id"],
+                    item_no=product.item_no,
+                    row_number=items[index]["row_number"],
+                    reason_code="AI_INVALID_RESPONSE",
+                    error=str(exc),
+                    duration_ms=round((perf_counter() - started) * 1000),
+                )
             except Exception as exc:
                 items[index]["reason_code"] = "AI_PROVIDER_ERROR"
                 items[index]["ai_error"] = str(exc)
+                if (items[index].get("pack_result") or {}).get("status") in {
+                    PackStatus.NEEDS_AGENT.value, PackStatus.NOT_FOUND.value,
+                }:
+                    items[index]["pack_result"]["status"] = "AGENT_ERROR"
+                    items[index]["pack_result"]["reason_code"] = "PACK_AGENT_ERROR"
+                _log_event(
+                    "item.inference_failed",
+                    job_id=items[index]["job_id"],
+                    item_no=product.item_no,
+                    row_number=items[index]["row_number"],
+                    reason_code="AI_PROVIDER_ERROR",
+                    error=str(exc),
+                    duration_ms=round((perf_counter() - started) * 1000),
+                )
 
         await asyncio.gather(*(infer(index, product) for index, product in candidates))

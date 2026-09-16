@@ -113,5 +113,17 @@ class MongoRepositories:
     def all_items(self, job_id: str) -> list[dict[str, Any]]:
         return list(self.db.job_items.find({"job_id": job_id}, {"_id": 0}).sort("row_number", ASCENDING))
 
+    def export_items(self, job_id: str) -> list[dict[str, Any]]:
+        projection = {
+            "_id": 0,
+            "row_number": 1,
+            "item_no": 1,
+            "group": 1,
+            "field_proposals": 1,
+            "review.overall_status": 1,
+            "review.override_values": 1,
+        }
+        return list(self.db.job_items.find({"job_id": job_id}, projection).sort("row_number", ASCENDING))
+
     def close(self) -> None:
         self.client.close()

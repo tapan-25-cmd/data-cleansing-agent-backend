@@ -15,6 +15,9 @@ class InputProduct(BaseModel):
     section: str | None = None
     legacy_size: Decimal | str | None = None
     legacy_uom: str | None = None
+    raw_standard_size: object | None = None
+    raw_standard_uom: object | None = None
+    raw_standard_pack_size: object | None = None
     standard_size: Decimal | str | None = None
     standard_uom: str | None = None
     standard_pack_size: Decimal | str | None = None
@@ -36,3 +39,4 @@ class RuleProposal(BaseModel):
     source_value: Decimal
     raw_target: Decimal
     final_target: Decimal
+    rounding_decimals: int | None = None

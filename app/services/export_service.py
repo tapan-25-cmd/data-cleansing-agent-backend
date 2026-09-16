@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from decimal import Decimal, InvalidOperation
 import logging
 from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
+from time import perf_counter
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile
 
@@ -19,6 +21,21 @@ PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 NS = {"s": SHEET_NS, "r": DOC_REL_NS, "p": PACKAGE_REL_NS}
 ET.register_namespace("", SHEET_NS)
 ET.register_namespace("r", DOC_REL_NS)
+
+
+def _log_event(event: str, **fields: object) -> None:
+    logger.info(json.dumps({"event": event, **fields}, default=str, separators=(",", ":")))
+
+
+class _Timer:
+    def __init__(self, event: str, **fields: object):
+        self.event = event
+        self.fields = fields
+        self.started = perf_counter()
+
+    def done(self, **fields: object) -> None:
+        elapsed = round((perf_counter() - self.started) * 1000)
+        _log_event(self.event, **self.fields, **fields, duration_ms=elapsed)
 
 
 def _excel_number(value: object) -> int | float | str | None:
@@ -112,6 +129,8 @@ class ExportService:
         job = self.repositories.get_job(job_id)
         if not job:
             raise ValueError("job not found")
+        if job.get("status") == "EXPORTED" and self.storage.get_output_path(job_id).exists():
+            return
         if job.get("status") == "EXPORTING":
             raise ExportBlockedError("workbook export is already running")
         self.repositories.update_job(job_id, {"status": "EXPORTING", "error": None, "progress.stage": "PREPARING_EXPORT"})
@@ -126,12 +145,22 @@ class ExportService:
         job = self.repositories.get_job(job_id)
         if not job:
             raise ValueError("job not found")
+        if job.get("status") == "EXPORTED" and self.storage.get_output_path(job_id).exists():
+            _log_event("export.idempotent_return", job_id=job_id)
+            return self.storage.get_output_path(job_id)
         source = self.storage.get_input_path(job_id)
         with NamedTemporaryFile(suffix=".xlsx", delete=False) as handle:
             temporary = Path(handle.name)
+        export_timer = _Timer("export.completed", job_id=job_id)
         try:
-            self.repositories.update_job(job_id, {"progress.stage": "APPLYING_PROPOSALS"})
+            self.repositories.update_job(job_id, {"progress.stage": "FETCHING_PROPOSALS"})
+            timer = _Timer("export.fetch_items", job_id=job_id)
+            export_items = self.repositories.export_items(job_id) if hasattr(self.repositories, "export_items") else self.repositories.all_items(job_id)
+            timer.done(item_count=len(export_items))
+
+            self.repositories.update_job(job_id, {"progress.stage": "READING_WORKBOOK"})
             with ZipFile(source, "r") as input_archive:
+                timer = _Timer("export.read_workbook", job_id=job_id)
                 worksheet_path = _worksheet_path(input_archive)
                 shared_strings = _shared_strings(input_archive)
                 worksheet = ET.fromstring(input_archive.read(worksheet_path))
@@ -144,7 +173,13 @@ class ExportService:
                     raise ValueError("worksheet header row is missing")
                 headers = {_cell_value(cell, shared_strings).strip(): _column_index(cell.get("r", "")) for cell in header.findall("s:c", NS)}
                 field_columns = {field: headers[FIELD_MAP[field]] for field in ("standard_size", "standard_uom", "standard_pack_size")}
-                for item in self.repositories.all_items(job_id):
+                timer.done(worksheet_path=worksheet_path, row_count=len(rows))
+
+                self.repositories.update_job(job_id, {"progress.stage": "PATCHING_KLM_FIELDS"})
+                timer = _Timer("export.patch_cells", job_id=job_id)
+                patched_cells = 0
+                skipped_rows = 0
+                for item in export_items:
                     review = item.get("review") or {}
                     if review.get("overall_status") == "REJECTED":
                         continue
@@ -155,6 +190,13 @@ class ExportService:
                     row_number = int(item["row_number"])
                     row = rows.get(row_number)
                     if row is None:
+                        skipped_rows += 1
+                        _log_event(
+                            "export.row_missing",
+                            job_id=job_id,
+                            row_number=row_number,
+                            item_no=item.get("item_no"),
+                        )
                         continue
                     for field, column in field_columns.items():
                         value = values.get(field)
@@ -167,21 +209,41 @@ class ExportService:
                             _set_cell(row, column, row_number, value, text=True)
                         else:
                             _set_cell(row, column, row_number, _excel_number(value), text=False)
+                        patched_cells += 1
+                timer.done(patched_cells=patched_cells, skipped_rows=skipped_rows)
+
+                self.repositories.update_job(job_id, {"progress.stage": "SERIALIZING_WORKSHEET"})
+                timer = _Timer("export.serialize_worksheet", job_id=job_id)
                 worksheet_bytes = ET.tostring(worksheet, encoding="utf-8", xml_declaration=True)
-                self.repositories.update_job(job_id, {"progress.stage": "SAVING_WORKBOOK"})
+                if not worksheet_bytes.startswith(b"<?xml"):
+                    raise ValueError("generated worksheet XML is invalid")
+                timer.done(byte_count=len(worksheet_bytes))
+
+                self.repositories.update_job(job_id, {"progress.stage": "WRITING_ARCHIVE"})
+                timer = _Timer("export.write_archive", job_id=job_id)
                 with ZipFile(temporary, "w", compression=ZIP_DEFLATED) as output_archive:
                     for entry in input_archive.infolist():
                         content = worksheet_bytes if entry.filename == worksheet_path else input_archive.read(entry.filename)
                         output_archive.writestr(entry, content)
+                timer.done(entry_count=len(input_archive.infolist()))
+
+            self.repositories.update_job(job_id, {"progress.stage": "VALIDATING_OUTPUT"})
+            timer = _Timer("export.validate_output", job_id=job_id)
             with ZipFile(temporary, "r") as output_archive:
-                corrupt_entry = output_archive.testzip()
-                if corrupt_entry:
-                    raise ValueError(f"generated workbook contains a corrupt entry: {corrupt_entry}")
+                output_archive.getinfo("xl/workbook.xml")
+                output_archive.getinfo(worksheet_path)
+            timer.done()
+
+            self.repositories.update_job(job_id, {"progress.stage": "STORING_OUTPUT"})
+            timer = _Timer("export.store_output", job_id=job_id)
             storage_key = self.storage.save_output(job_id, temporary)
+            timer.done(storage_key=storage_key)
             self.repositories.update_job(job_id, {"status": "EXPORTED", "output_storage_key": storage_key, "error": None, "progress.stage": "EXPORTED"})
+            export_timer.done(status="EXPORTED")
             return self.storage.get_output_path(job_id)
         except Exception as exc:
             self.repositories.update_job(job_id, {"status": "FAILED", "progress.stage": "FAILED", "error": f"{type(exc).__name__}: {exc}"})
+            _log_event("export.failed", job_id=job_id, error_type=type(exc).__name__, error=str(exc))
             raise
         finally:
             temporary.unlink(missing_ok=True)

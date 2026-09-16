@@ -15,3 +15,18 @@ Rules are validated at startup. Duplicate identifiers, duplicate enabled source 
 invalid target units, non-positive factors, and unsupported operations stop startup.
 `FZ`, `ST`, `SET`, `PR`, and `AV KG` remain intentionally absent until their business
 rules are confirmed.
+
+## Rounding and Group A validation
+
+Group B1/B2 unit-conversion proposals use Excel-equivalent nearest-whole rounding
+(`ROUND_HALF_UP` at zero decimal places). The exact `raw_target` and rounded
+`final_target` are both retained in proposal provenance. This processing policy is
+applied by the Group B pipeline rather than as a global ruleset default, so Group C can
+retain an independent policy.
+
+Existing Group A K/L/M values are never rounded or rewritten. A complete row qualifies
+for A only after deterministic validation confirms a positive finite size, exact
+canonical base UOM, and positive whole-number pack size. Known spelling/casing aliases
+are routed to B3 canonicalization instead of being silently accepted as A.
+B3 is cleanup rather than measurement conversion, so it preserves the existing numeric
+K/M values and proposes only the fields whose representation is non-canonical.

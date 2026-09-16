@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from importlib.metadata import version
 from time import perf_counter
@@ -23,6 +24,10 @@ WORKER_USER_ID = "uom-cleansing-worker"
 logger = logging.getLogger(__name__)
 
 
+def _log_event(event: str, **fields: object) -> None:
+    logger.info(json.dumps({"event": event, **fields}, default=str, separators=(",", ":")))
+
+
 class AdkInferenceProvider:
     def __init__(self, bundle: UomAgentBundle, timeout_seconds: float = 60):
         self.bundle = bundle
@@ -31,6 +36,23 @@ class AdkInferenceProvider:
         self.runner = Runner(app=bundle.app, session_service=self.session_service)
 
     async def infer(self, request: InferenceRequest) -> InferenceResponse:
+        last_invalid: InvalidInferenceResponseError | None = None
+        for attempt in range(1, 3):
+            try:
+                return await self._infer_once(request, attempt)
+            except InvalidInferenceResponseError as exc:
+                last_invalid = exc
+                _log_event(
+                    "ai.invalid_response",
+                    attempt=attempt,
+                    model_id=self.bundle.model_id,
+                    error=str(exc),
+                )
+                if attempt == 2:
+                    raise
+        raise last_invalid or InferenceProviderError("ADK inference failed")
+
+    async def _infer_once(self, request: InferenceRequest, attempt: int) -> InferenceResponse:
         session_id = str(uuid4())
         started = perf_counter()
         await self.session_service.create_session(
@@ -61,6 +83,16 @@ class AdkInferenceProvider:
                 raise InvalidInferenceResponseError(
                     f"ADK returned an invalid inference result: {exc}"
                 ) from exc
+            latency_ms = round((perf_counter() - started) * 1000)
+            _log_event(
+                "ai.inference_completed",
+                attempt=attempt,
+                model_id=self.bundle.model_id,
+                session_id=session_id,
+                latency_ms=latency_ms,
+                status=result.status,
+                reason_code=result.reason_code,
+            )
             return InferenceResponse(
                 result=result,
                 metadata=ProviderMetadata(
@@ -71,7 +103,7 @@ class AdkInferenceProvider:
                     prompt_sha256=self.bundle.prompt_sha256,
                     model_id=self.bundle.model_id,
                     adk_version=version("google-adk"),
-                    latency_ms=round((perf_counter() - started) * 1000),
+                    latency_ms=latency_ms,
                     session_id=session_id,
                 ),
             )

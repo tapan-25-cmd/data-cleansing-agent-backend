@@ -1,6 +1,7 @@
 # UoM inference agent
 
-This package owns the narrow AI boundary for Group C rows. The agent may extract only
+This package owns the narrow AI boundary for Group C measurement rows and unresolved
+Group B/C pack clues. The agent may extract only
 explicit unit-size and pack-count evidence from the six permitted product-text fields.
 It does not normalize units, convert values, write to MongoDB, or make approval decisions.
 
@@ -8,7 +9,7 @@ It does not normalize units, convert values, write to MongoDB, or make approval 
 
 - `uom_inference_agent.py` defines the real Google ADK `LlmAgent`, Gemini model adapter,
   structured schemas, generation controls, and application wrapper.
-- `prompts/uom_inference_v1.md` is the versioned, packaged system instruction.
+- `prompts/uom_inference_v2.md` is the versioned, packaged system instruction.
 - `adk_provider.py` runs one isolated ADK session per item, validates the final response,
   checks literal evidence, records provenance, and enforces a timeout.
 - `provider.py` defines the provider-independent input/output contract.
@@ -16,7 +17,9 @@ It does not normalize units, convert values, write to MongoDB, or make approval 
   silently falls back from the real provider.
 - `mock_provider.py` supports deterministic local development and tests.
 
-The processor passes every extracted measurement to the deterministic rules engine.
+Group B `PACK_ONLY` requests contain description fields plus an optional known
+measurement used solely to separate unit size from pack count. They cannot return or
+alter a measurement. The processor passes every extracted measurement to the deterministic rules engine.
 Unit aliases, conversions, rounding, and base-unit policy remain in
 `../rules/unit_mappings.v1.yaml` and are maintained through normal code review.
 

@@ -12,10 +12,10 @@ from app.agents.provider import InferenceRequest, InferenceResult
 from app.config import Settings
 
 AGENT_NAME = "uom_description_inference_agent"
-AGENT_VERSION = "1.0.0"
-PROMPT_VERSION = "uom-inference-v1"
+AGENT_VERSION = "1.1.0"
+PROMPT_VERSION = "uom-inference-v2"
 APP_NAME = "uom_cleansing"
-PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_inference_v1.md"
+PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_inference_v2.md"
 
 
 @dataclass(frozen=True)
@@ -54,7 +54,8 @@ def build_uom_agent(settings: Settings) -> UomAgentBundle:
         output_key="uom_inference_result",
         generate_content_config=types.GenerateContentConfig(
             temperature=0,
-            max_output_tokens=800,
+            max_output_tokens=4096,
+            thinking_config=types.ThinkingConfig(thinking_level="LOW"),
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         ),
         tools=[],

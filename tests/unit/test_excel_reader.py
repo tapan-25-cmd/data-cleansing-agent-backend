@@ -28,6 +28,31 @@ def test_reader_maps_by_header_and_preserves_leading_zero_item(tmp_path: Path):
     assert row.product.legacy_uom == "KG"
 
 
+def test_reader_preserves_raw_standardized_values_for_validation(tmp_path: Path):
+    path = tmp_path / "input.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = INPUT_SHEET
+    headers = sorted(set(FIELD_MAP.values()) | PURGE_HEADERS)
+    sheet.append(headers)
+    values = {header: None for header in headers}
+    values.update({
+        "Item_no": "000123",
+        "Department": "03_Grocery 2",
+        "Standardize Unit Size": "500",
+        "Standardize UOM": " ml ",
+        "Standardize Pack Size": "1",
+    })
+    sheet.append([values[header] for header in headers])
+    workbook.save(path)
+
+    row = next(ExcelReader().iter_rows(path))
+    assert row.product.raw_standard_size == "500"
+    assert row.product.raw_standard_uom == " ml "
+    assert row.product.raw_standard_pack_size == "1"
+    assert row.product.standard_uom == "ML"
+
+
 def test_missing_header_fails_before_processing(tmp_path: Path):
     path = tmp_path / "input.xlsx"
     make_workbook(path, missing="Standardize UOM")

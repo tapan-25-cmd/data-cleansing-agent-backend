@@ -26,6 +26,16 @@ def test_decimal_conversion_and_rounding():
     assert result.standard_uom == "GM"
 
 
+def test_group_b_nearest_whole_matches_excel_rounding():
+    engine = RuleEngine(load_default_registry(), default_rounding_decimals=0)
+    first = engine.propose("16", "OZ")
+    second = engine.propose("18", "OZ")
+    assert first.standard_size == Decimal("454")
+    assert second.standard_size == Decimal("510")
+    assert first.raw_target == Decimal("453.592370000")
+    assert first.rounding_decimals == 0
+
+
 def test_unknown_rule_never_guesses():
     assert RuleEngine(load_default_registry()).propose("16", "FZ") is None
 

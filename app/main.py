@@ -31,6 +31,7 @@ async def lifespan(app: FastAPI):
         create_inference_provider(settings),
         settings.default_rounding_decimals,
         settings.ai_max_concurrency,
+        settings.pack_size_inference_enabled,
     )
     app.state.exporter = ExportService(repositories, file_storage)
     app.state.chat_coordinator = ChatCoordinator()
