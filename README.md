@@ -28,3 +28,5 @@ PYTHONPATH=tests/test_bootstrap python -m pytest
 The `PYTHONPATH` entry activates the repository's small macOS/Python 3.12 readline test bootstrap; it is harmless on other platforms.
 
 Deterministic unit mappings are maintained in `app/rules/unit_mappings.v1.yaml`. See `app/rules/README.md` and `app/agents/README.md` for ownership and maintenance guidance.
+
+The complete project plan and agent architecture are available in [`docs/implementation-plan.md`](docs/implementation-plan.md) and [`docs/adk-agent-design.md`](docs/adk-agent-design.md).
