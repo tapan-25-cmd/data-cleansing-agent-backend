@@ -4,7 +4,7 @@ from uuid import uuid4
 from openpyxl import Workbook, load_workbook
 
 from app.services.excel_reader import FIELD_MAP, INPUT_SHEET
-from app.services.export_service import ExportService
+from app.services.export_service import AUDIT_COLUMNS, ExportService
 from app.storage.local import LocalFileStorage
 
 
@@ -75,5 +75,80 @@ def test_export_applies_pending_proposals_without_rebuilding_workbook(tmp_path):
     assert output_sheet.cell(3, output_headers[FIELD_MAP["standard_uom"]]).value == "ML"
     assert output_sheet.cell(3, output_headers[FIELD_MAP["standard_pack_size"]]).value == 1
     assert result.sheetnames == [INPUT_SHEET]
+    assert set(AUDIT_COLUMNS).issubset(output_headers)
+    assert output_sheet.cell(2, output_headers["Cleansing Status"]).value == "NO_CHANGE"
     result.close()
     assert repositories.job["status"] == "EXPORTED"
+
+
+def test_export_does_not_apply_unapproved_review_required_proposal(tmp_path):
+    job_id = str(uuid4())
+    storage = LocalFileStorage(tmp_path, 10_000_000)
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = INPUT_SHEET
+    headers = list(FIELD_MAP.values())
+    sheet.append(headers)
+    row = [None] * len(headers)
+    row[headers.index(FIELD_MAP["item_no"])] = "044305"
+    row[headers.index(FIELD_MAP["standard_size"])] = 375
+    row[headers.index(FIELD_MAP["standard_uom"])] = "GM"
+    row[headers.index(FIELD_MAP["standard_pack_size"])] = 1
+    sheet.append(row)
+    source = BytesIO()
+    workbook.save(source)
+    source.seek(0)
+    storage.save_input(job_id, source)
+
+    repositories = RepositoriesStub()
+    repositories.items = [{
+        "row_number": 2,
+        "item_no": "044305",
+        "application_policy": "REVIEW_REQUIRED",
+        "field_proposals": {
+            "standard_size": "349",
+            "standard_uom": "GM",
+            "standard_pack_size": None,
+        },
+        "findings": [{
+            "code": "SIGNIFICANT_LEGACY_SIZE_MISMATCH",
+            "category": "SOURCE_DISCREPANCY",
+            "human_reason": "Existing 375 GM differs from converted 349 GM",
+        }],
+        "changes": [{
+            "field": "standard_size",
+            "original": "375",
+            "proposed": "349",
+            "final": "375",
+        }, {
+            "field": "standard_uom",
+            "original": "GM",
+            "proposed": "GM",
+            "final": "GM",
+        }, {
+            "field": "standard_pack_size",
+            "original": "1",
+            "proposed": None,
+            "final": "1",
+        }],
+        "method": "RULE",
+        "result_ledger_version": "result-ledger-v1",
+        "review": {
+            "overall_status": "PENDING",
+            "override_values": None,
+            "comment": None,
+        },
+    }]
+    service = ExportService(repositories, storage)
+
+    service.prepare_export(job_id)
+    output = service.export(job_id)
+
+    result = load_workbook(output, read_only=True, data_only=True)
+    output_sheet = result[INPUT_SHEET]
+    output_headers = {cell.value: cell.column for cell in output_sheet[1]}
+    assert output_sheet.cell(2, output_headers[FIELD_MAP["standard_size"]]).value == 375
+    assert output_sheet.cell(2, output_headers["Proposed K"]).value == "349"
+    assert output_sheet.cell(2, output_headers["Final K"]).value == "375"
+    assert output_sheet.cell(2, output_headers["Review Status"]).value == "PENDING"
+    result.close()

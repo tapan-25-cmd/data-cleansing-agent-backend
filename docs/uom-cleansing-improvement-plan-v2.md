@@ -4,6 +4,89 @@
 **Date:** 21 September 2026  
 **Scope:** Explainable result ledger, human-in-the-loop review, packaging intelligence, discrepancy detection, and measurable accuracy.
 
+## Implementation status — 21 September 2026
+
+Implemented in the current working tree:
+
+- PRD-enforced exclusion of derived Excel columns B/C from every decision path;
+- exact Group A identity comparison and one-unit conversion tolerance;
+- structured package-expression validation and review routing;
+- structured findings, field changes, application policy, evidence, and versions;
+- server-paginated result APIs, facets, search, filters, and row details;
+- approve, reject, and human-override decisions with refreshed final values;
+- review-safe export plus appended audit columns while preserving source cells;
+- detailed results ledger and row drawer in the frontend;
+- stakeholder **Agent performance** page: blind-test agreement on the client's own data plus
+  open business decisions (replaces the Accuracy & Test Cases tab; see
+  `evaluation-experience-plan.md`);
+- five real packaging-review rows in the controlled v0.2 baseline;
+- discrepancy engine v2 (section 8) and live per-stage job progress — see below.
+
+### Discrepancy engine v2 (`discrepancy-v2`)
+
+`backend/app/services/discrepancy_service.py` replaces the first-signal comparison.
+On the v0.2 workbook the first-signal engine flagged **0** rows, because it could not
+read local-language units (`克`, `毫升`, `公升`, `安士`), missed units glued to a
+multiplier (`500MLX2`), and ignored counts entirely. The v2 engine flags **3** rows,
+all genuine: `349910` (`\12` versus `四片裝`) and `243477`/`243519`, where the local
+text reads `424 X 32GM` against the English `4'S CASE 24 X 32GM`.
+
+**Scope decision (21 Sep 2026): only the three language pairs are compared.** English
+is compared with the local language within brand, within item description, and within
+web description. Pairs are never crossed — brand is not compared with a description, and
+item description is not compared with web description. The item-versus-web comparison
+proposed in section 8, point 3 was built, measured (10 further rows), and removed at the
+business owner's request.
+
+- **Multi-signal extraction:** every measurement and count in the six permitted fields,
+  with literal fragment, offsets, source unit, and normalized GM/ML value. Counts cover
+  `4'S`, `3S`, `18P`, `\5`, `5 x`, `N CASE`, `5包裝`, `三件裝`, `孖裝`, and `N X size`.
+- **Bilingual pairs (FR-18):** brand, item description, and web description are each
+  compared English versus local language. A pair agrees when *any* measurement on one
+  side is equivalent to any on the other. Converted units (`16OZ` vs `454克`) use the same
+  one-unit tolerance as Group A validation; identical units compare exactly.
+- **Packaging-aware:** if sizes differ only by a stated count (`6 X 90GM` vs `540克`) the
+  result is a `PACKAGING_LEVEL_DIFFERENCE` observation, not a conflict.
+- **Missing side:** one populated side is `INSUFFICIENT_COMPARISON_DATA`. It is stored on
+  the row but is not a finding.
+- **Classification:** `VALUE_CONFLICT`, `DIMENSION_CONFLICT`, `LIKELY_TYPO`,
+  `COUNT_CONFLICT`; `OZ` against a volume is `FLUID_OUNCE_AMBIGUOUS` (O-2 is open).
+- **Evidence:** `job_items.discrepancy` stores `version`, `flagged`, every `detail` with
+  both sides' signals, and the per-field `signals`.
+
+Routing deliberately keeps the v0.2 baseline counts unchanged:
+
+| Result | Effect |
+|---|---|
+| Bilingual **measurement** conflict | Group A row moves to `VALIDATION_REVIEW` (existing policy; 0 rows in v0.2) |
+| Bilingual **count** conflict | `PACK_COUNT_CONFLICT` finding, `REVIEW_REQUIRED`; A/B/C group unchanged |
+| Packaging-level / fluid-ounce observation | `INFO` finding, never review |
+
+A conflict never proposes K/L/M. On a Group B row it holds the rule proposal back from
+export until a reviewer approves it (FR-20). Group A description warnings now consider
+every measurement at every stated packaging level against both `K` and `K × M`, which
+removes first-signal false warnings and adds local-language checks.
+
+Not built from section 8: cross-source comparison (out of scope by the decision above),
+length units (`CM`, `吋`), an approved per-dimension
+tolerance table (the single one-unit tolerance is reused), and the AI fallback for
+ambiguous discrepancies (`DISCREPANCY_AI_FALLBACK_ENABLED` is still unused).
+
+### Live job progress
+
+`ProgressReporter` in `processor.py` writes `jobs.progress` during processing, throttled
+to one MongoDB write per 0.75 s plus the final row of each stage:
+`PROFILING` (workbook rows, total from the sheet dimension) → `PROCESSING_RULES` (selected
+rows) → `PROCESSING_DESCRIPTIONS` (`unit: AGENT_CALLS`, one tick per completed agent call)
+→ `CHECKING_DISCREPANCIES` → `SAVING_RESULTS`. `percent` is a weighted overall figure that
+never decreases. The chat shows the stage, the count, and a real progress bar.
+
+Still gated on business input rather than engineering:
+
+- approval of the three proposed golden-case labels and hierarchy semantics;
+- permission to promote any review-only mismatch or hierarchy pattern to automatic correction;
+- a measured accuracy percentage, which requires an approved labelled set and recorded evaluation run.
+
 ## 1. Outcome
 
 Keep the existing chat upload and processing experience. After processing completes, add a **View detailed results** button that opens a full-page, Excel-like result ledger in the same application shell. The ledger must show every selected row, what changed or did not change, why, the evidence used, the responsible method, and whether a human decision is required. A second tab must show versioned business test cases and accuracy results.
@@ -19,6 +102,18 @@ agent extracts explicit observations
 ```
 
 The LLM must not invent packaging arithmetic, choose an unapproved hierarchy, or directly mutate K/L/M.
+
+### 1.1 PRD source boundary
+
+Excel columns **B (`product_description`) and C (`product_description_local`) are out of scope**. They are concatenated/derived display values rather than independent source evidence. The backend must not use either column for:
+
+- Group A validation or discrepancy decisions;
+- packaging or pack-size extraction;
+- deterministic proposals or review recommendations;
+- ADK/LLM prompt context;
+- confidence scoring, corroboration, or test-case expected values.
+
+They may remain untouched in the workbook and may be displayed as original read-only cells if the product UI later needs full-row fidelity, but they must never affect a cleansing outcome. Only PRD-approved independent fields—legacy I/J, existing K/L/M, item/web descriptions, brand fields where permitted, and hierarchy metadata where permitted—may contribute evidence.
 
 ## 2. Findings from the real v0.2 job
 
@@ -54,6 +149,10 @@ The current first-signal discrepancy logic cannot explain these records:
 | `241547` | `CASE/12 X 185GM` | `185 / GM / 12` | ordinary per-unit size and count |
 
 Similar syntax has different existing interpretations. The two KIKI rows are also exceptional among nearby case-offer items. They must become labelled business test cases before automation; they are not sufficient evidence for a general division rule.
+
+This conclusion uses the independent web descriptions, legacy I/J, and existing K/L/M only. Columns B/C were inspected during investigation but, per the PRD, are derived concatenations and are excluded from every decision and from the evidence reported above.
+
+Backend verification also identifies three yoghurt rows (`226167`, `226555`, and `226258`) where the approved item description indicates a 10/12-unit retail pack while the web description expresses a 30/36-unit case. These are genuine packaging-level ambiguities, not safe automatic corrections, and therefore join the two KIKI rows in human review. The controlled v0.2 baseline becomes 11,970 A rows and five validation-review rows; B/C and purge counts remain unchanged.
 
 ### 2.4 Group C evidence coverage
 
@@ -241,7 +340,7 @@ Generate named candidates from extracted facts:
 - nested-count: `M = outer_count * inner_count`;
 - business-specific allocation: `K = measurement / outer_count`, only if an approved policy explicitly permits it.
 
-Validate each candidate against legacy I/J, existing K/L/M, package terminology, section policy, and cross-language evidence. If exactly one approved interpretation survives, propose it. If multiple survive, create `PACKAGING_HIERARCHY_AMBIGUOUS` and require review.
+Validate each candidate against legacy I/J, existing K/L/M, package terminology, section policy, and cross-language evidence from PRD-approved independent fields. If exactly one approved interpretation survives, propose it. If multiple survive, create `PACKAGING_HIERARCHY_AMBIGUOUS` and require review. Columns B/C must not be used as corroboration.
 
 Do not learn a global arithmetic rule from items `241315` and `241448`; create a narrowly scoped policy only after business owners confirm why their existing values are correct and which source fields identify that scope.
 
@@ -249,7 +348,7 @@ Do not learn a global arithmetic rule from items `241315` and `241448`; create a
 
 1. Preserve valid existing M.
 2. Normalize numeric-text M without changing value.
-3. Extract all counts, measurements, operators, and package terms from every description field.
+3. Extract all counts, measurements, operators, and package terms from PRD-approved independent description fields only; explicitly exclude columns B/C.
 4. Build packaging-level candidates; do not select a count merely because it is consistent across fields.
 5. Check agreement with K/L, legacy I/J, section policy, and bilingual descriptions.
 6. Auto-apply only an approved, unambiguous pattern.
@@ -273,7 +372,7 @@ Revised policy:
 
 The current engine extracts only the first measurement from each field and compares only within three bilingual pairs. Replace it with:
 
-1. **Multi-signal extraction:** return every measurement, count, and package expression with offsets and normalized values.
+1. **Multi-signal extraction:** return every measurement, count, and package expression from PRD-approved independent fields with offsets and normalized values; never scan columns B/C.
 2. **Pair comparison:** compare English/local brand, item description, and web description independently.
 3. **Cross-source comparison:** compare item description to web description and all explicit facts to legacy and K/L/M.
 4. **Tolerance-aware equivalence:** treat approved conversion/rounding tolerances as equivalent.

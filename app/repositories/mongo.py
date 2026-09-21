@@ -4,6 +4,8 @@ from typing import Any, Iterable
 from pymongo import ASCENDING, MongoClient, ReplaceOne
 from pymongo.database import Database
 
+from app.services.result_status import STATUSES, status_query
+
 
 def now() -> datetime:
     return datetime.now(timezone.utc)
@@ -30,6 +32,10 @@ class MongoRepositories:
         self.db.job_items.create_index([("job_id", ASCENDING), ("group", ASCENDING)])
         self.db.job_items.create_index([("job_id", ASCENDING), ("review.overall_status", ASCENDING)])
         self.db.job_items.create_index([("job_id", ASCENDING), ("rule.rule_id", ASCENDING)])
+        self.db.job_items.create_index([("job_id", ASCENDING), ("application_policy", ASCENDING)])
+        self.db.job_items.create_index([("job_id", ASCENDING), ("findings.category", ASCENDING)])
+        self.db.job_items.create_index([("job_id", ASCENDING), ("findings.severity", ASCENDING)])
+        self.db.ai_reading_results.create_index([("job_id", ASCENDING), ("row_number", ASCENDING)])
 
     def create_job(self, document: dict[str, Any]) -> None:
         timestamp = now()
@@ -64,6 +70,36 @@ class MongoRepositories:
             {"job_id": job_id, "row_number": row_number}, {"$set": values}
         )
         return result.matched_count == 1
+
+    def get_item(self, job_id: str, row_number: int) -> dict[str, Any] | None:
+        return public(self.db.job_items.find_one({
+            "job_id": job_id,
+            "row_number": row_number,
+        }))
+
+    def result_facets(self, job_id: str) -> dict[str, dict[str, int]]:
+        fields = {
+            "group": "$group",
+            "review_status": "$review.overall_status",
+            "finding_category": "$findings.category",
+            "finding_severity": "$findings.severity",
+        }
+        result: dict[str, dict[str, int]] = {}
+        for name, expression in fields.items():
+            rows = self.db.job_items.aggregate([
+                {"$match": {"job_id": job_id}},
+                {"$unwind": "$findings"} if name.startswith("finding_") else {"$match": {}},
+                {"$group": {"_id": expression, "count": {"$sum": 1}}},
+                {"$match": {"_id": {"$ne": None}}},
+                {"$sort": {"_id": 1}},
+            ])
+            result[name] = {str(row["_id"]): int(row["count"]) for row in rows}
+        # Statuses are derived, so each is counted with the same filter the ledger uses.
+        result["status"] = {
+            status: self.db.job_items.count_documents({"job_id": job_id, **status_query(status)})
+            for status in STATUSES
+        }
+        return result
 
     def conversion_groups(self, job_id: str) -> list[dict[str, Any]]:
         pipeline = [
@@ -122,8 +158,34 @@ class MongoRepositories:
             "field_proposals": 1,
             "review.overall_status": 1,
             "review.override_values": 1,
+            "review.comment": 1,
+            "application_policy": 1,
+            "findings": 1,
+            "changes": 1,
+            "method": 1,
+            "reason_code": 1,
+            "result_ledger_version": 1,
         }
         return list(self.db.job_items.find({"job_id": job_id}, projection).sort("row_number", ASCENDING))
+
+    def quality_items(self, job_id: str) -> list[dict[str, Any]]:
+        projection = {
+            "_id": 0, "row_number": 1, "item_no": 1, "group": 1, "original": 1,
+            "context": 1, "findings.code": 1, "findings.human_reason": 1,
+            "reason_code": 1, "pack_result.status": 1, "application_policy": 1,
+            "review.overall_status": 1, "field_proposals": 1, "rule.rule_id": 1,
+            "verification": 1,
+        }
+        return list(self.db.job_items.find({"job_id": job_id}, projection).sort("row_number", ASCENDING))
+
+    def ai_reading_results(self, job_id: str) -> list[dict[str, Any]]:
+        return list(self.db.ai_reading_results.find({"job_id": job_id}, {"_id": 0}))
+
+    def replace_ai_reading_results(self, job_id: str, results: list[dict[str, Any]]) -> None:
+        """Per-product audit trail of the latest AI reading test for a job."""
+        self.db.ai_reading_results.delete_many({"job_id": job_id})
+        if results:
+            self.db.ai_reading_results.insert_many([dict(result) for result in results])
 
     def close(self) -> None:
         self.client.close()

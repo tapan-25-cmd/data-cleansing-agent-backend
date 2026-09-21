@@ -22,6 +22,27 @@ NS = {"s": SHEET_NS, "r": DOC_REL_NS, "p": PACKAGE_REL_NS}
 ET.register_namespace("", SHEET_NS)
 ET.register_namespace("r", DOC_REL_NS)
 
+AUDIT_COLUMNS = (
+    "Cleansing Status",
+    "Cleansing Finding Codes",
+    "Cleansing Categories",
+    "Cleansing Changed Fields",
+    "Original K",
+    "Proposed K",
+    "Final K",
+    "Original L",
+    "Proposed L",
+    "Final L",
+    "Original M",
+    "Proposed M",
+    "Final M",
+    "Cleansing Reason",
+    "Cleansing Method",
+    "Cleansing Version",
+    "Review Status",
+    "Review Comment",
+)
+
 
 def _log_event(event: str, **fields: object) -> None:
     logger.info(json.dumps({"event": event, **fields}, default=str, separators=(",", ":")))
@@ -114,6 +135,55 @@ def _set_cell(row: ET.Element, column: int, row_number: int, value: object, text
         ET.SubElement(cell, f"{{{SHEET_NS}}}v").text = str(value)
 
 
+def _audit_values(item: dict[str, object]) -> tuple[str, ...]:
+    findings = list(item.get("findings") or [])
+    changes = {
+        change.get("field"): change
+        for change in list(item.get("changes") or [])
+    }
+    review = dict(item.get("review") or {})
+    proposals = dict(item.get("field_proposals") or {})
+    status = str(item.get("application_policy") or "NO_CHANGE")
+    review_status = str(review.get("overall_status") or "NOT_REQUIRED")
+    overrides = dict(review.get("override_values") or {})
+
+    def values(field: str) -> tuple[str, str, str]:
+        change = dict(changes.get(field) or {})
+        original = change.get("original")
+        proposed = change.get("proposed", proposals.get(field))
+        if review_status == "OVERRIDDEN" and overrides.get(field) is not None:
+            final = overrides[field]
+        elif review_status == "APPROVED" and proposed is not None:
+            final = proposed
+        elif status == "AUTO_APPLY" and proposed is not None:
+            final = proposed
+        else:
+            final = original
+        return tuple("" if value is None else str(value) for value in (original, proposed, final))
+
+    k = values("standard_size")
+    l = values("standard_uom")
+    m = values("standard_pack_size")
+    changed_fields = [
+        field for field, change in changes.items()
+        if change.get("proposed") is not None
+    ]
+    return (
+        status,
+        "; ".join(str(row.get("code") or "") for row in findings),
+        "; ".join(sorted({str(row.get("category") or "") for row in findings if row.get("category")})),
+        "; ".join(changed_fields),
+        *k,
+        *l,
+        *m,
+        " | ".join(str(row.get("human_reason") or "") for row in findings),
+        str(item.get("method") or "NONE"),
+        str(item.get("result_ledger_version") or ""),
+        review_status,
+        str(review.get("comment") or ""),
+    )
+
+
 class ExportBlockedError(ValueError):
     pass
 
@@ -173,6 +243,9 @@ class ExportService:
                     raise ValueError("worksheet header row is missing")
                 headers = {_cell_value(cell, shared_strings).strip(): _column_index(cell.get("r", "")) for cell in header.findall("s:c", NS)}
                 field_columns = {field: headers[FIELD_MAP[field]] for field in ("standard_size", "standard_uom", "standard_pack_size")}
+                audit_start = max(headers.values()) + 1
+                for offset, audit_header in enumerate(AUDIT_COLUMNS):
+                    _set_cell(header, audit_start + offset, 1, audit_header, text=True)
                 timer.done(worksheet_path=worksheet_path, row_count=len(rows))
 
                 self.repositories.update_job(job_id, {"progress.stage": "PATCHING_KLM_FIELDS"})
@@ -185,6 +258,13 @@ class ExportService:
                         continue
                     if review.get("overall_status") == "OVERRIDDEN":
                         values = review.get("override_values") or {}
+                    elif (
+                        item.get("application_policy") == "REVIEW_REQUIRED"
+                        and review.get("overall_status") != "APPROVED"
+                    ):
+                        # Download remains available, but unapproved human-review
+                        # proposals must not mutate the workbook.
+                        values = {}
                     else:
                         values = item.get("field_proposals") or {}
                     row_number = int(item["row_number"])
@@ -210,6 +290,21 @@ class ExportService:
                         else:
                             _set_cell(row, column, row_number, _excel_number(value), text=False)
                         patched_cells += 1
+                    for offset, value in enumerate(_audit_values(item)):
+                        _set_cell(
+                            row,
+                            audit_start + offset,
+                            row_number,
+                            value,
+                            text=True,
+                        )
+                        patched_cells += 1
+                dimension = worksheet.find("s:dimension", NS)
+                if dimension is not None:
+                    dimension.set(
+                        "ref",
+                        f"A1:{_column_name(audit_start + len(AUDIT_COLUMNS) - 1)}{max(rows)}",
+                    )
                 timer.done(patched_cells=patched_cells, skipped_rows=skipped_rows)
 
                 self.repositories.update_job(job_id, {"progress.stage": "SERIALIZING_WORKSHEET"})

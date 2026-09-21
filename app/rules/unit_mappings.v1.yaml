@@ -1,4 +1,4 @@
-version: poc-v1
+version: poc-v2
 rules:
   - rule_id: GM_IDENTITY
     source_uoms: [GM]
@@ -8,7 +8,7 @@ rules:
     enabled: true
     notes: Existing base-weight value copied into blank standardized fields.
   - rule_id: ML_IDENTITY
-    source_uoms: [ML]
+    source_uoms: [ML, 毫升]
     target_uom: ML
     operation: MULTIPLY
     factor: "1"
@@ -29,35 +29,35 @@ rules:
     enabled: true
     notes: Existing base-length value copied into blank standardized fields.
   - rule_id: KG_TO_GM
-    source_uoms: [KG]
+    source_uoms: [KG, 公斤, 千克]
     target_uom: GM
     operation: MULTIPLY
     factor: "1000"
     enabled: true
     notes: Standard metric conversion.
   - rule_id: G_TO_GM
-    source_uoms: [G]
+    source_uoms: [G, 克]
     target_uom: GM
     operation: MULTIPLY
     factor: "1"
     enabled: true
-    notes: Gram alias normalization.
+    notes: Gram alias normalization. poc-v2 adds the local-language spelling; the AI reports units exactly as written.
   - rule_id: OZ_TO_GM
-    source_uoms: [OZ]
+    source_uoms: [OZ, 安士]
     target_uom: GM
     operation: MULTIPLY
     factor: "28.349523125"
     enabled: true
     notes: International avoirdupois ounce; rounding policy remains configurable.
   - rule_id: LB_TO_GM
-    source_uoms: [LB]
+    source_uoms: [LB, LBS, 磅]
     target_uom: GM
     operation: MULTIPLY
     factor: "453.59237"
     enabled: true
     notes: International avoirdupois pound; rounding policy remains configurable.
   - rule_id: LT_TO_ML
-    source_uoms: [LT, L]
+    source_uoms: [LT, L, LTR, 公升, 升]
     target_uom: ML
     operation: MULTIPLY
     factor: "1000"

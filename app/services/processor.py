@@ -5,8 +5,8 @@ import json
 import logging
 from collections import Counter
 from decimal import Decimal
-from time import perf_counter
-from typing import Any
+from time import monotonic, perf_counter
+from typing import Any, Callable
 
 from app.agents.provider import (
     InferenceProvider,
@@ -19,7 +19,11 @@ from app.domain.product import InputProduct
 from app.repositories.mongo import MongoRepositories
 from app.rules.registry import RuleRegistry
 from app.services.classifier import classify
-from app.services.discrepancy_service import find_discrepancies
+from app.services.discrepancy_service import (
+    DISCREPANCY_ENGINE_VERSION,
+    DiscrepancyReport,
+    analyze_discrepancies,
+)
 from app.services.excel_reader import ExcelReader, WorkbookRow
 from app.services.group_a_validator import (
     GROUP_A_VALIDATION_VERSION,
@@ -35,8 +39,11 @@ from app.services.pack_size_service import (
     PackSizeService,
     PackStatus,
 )
+from app.services.packaging_expression_service import PACKAGING_EXPRESSION_VERSION
 from app.services.purge_detector import is_purged
+from app.services.quality_service import QualityService
 from app.services.rule_engine import RuleEngine
+from app.services.result_ledger_service import enrich_result_item
 from app.storage.local import LocalFileStorage
 
 logger = logging.getLogger(__name__)
@@ -47,13 +54,15 @@ EXPECTED_V02 = {
     "department_rows": 13300,
     "purged": 758,
     "live": 12542,
-    "group_a": 11975,
+    # Five formerly trusted A rows now route to review because their explicit
+    # case hierarchy conflicts with existing K/L/M (2 KIKI + 3 yoghurt rows).
+    "group_a": 11970,
     "group_b": 512,
     "group_b1": 304,
     "group_b2": 170,
     "group_b3": 38,
     "group_c": 55,
-    "validation_review": 0,
+    "validation_review": 5,
     "data_shape_error": 0,
 }
 
@@ -105,6 +114,61 @@ def _context(product: InputProduct) -> dict[str, object]:
     }
 
 
+# Share of the overall bar given to each stage, in the order they run.
+_STAGE_SPAN = {
+    "PROFILING": (0, 35),
+    "PROCESSING_RULES": (35, 55),
+    "PROCESSING_DESCRIPTIONS": (55, 85),
+    "CHECKING_DISCREPANCIES": (85, 88),
+    "SAVING_RESULTS": (88, 99),
+}
+
+
+class ProgressReporter:
+    """Persist live progress without writing to MongoDB on every row."""
+
+    def __init__(
+        self,
+        repositories: MongoRepositories,
+        job_id: str,
+        min_interval_seconds: float = 0.75,
+    ):
+        self.repositories = repositories
+        self.job_id = job_id
+        self.min_interval_seconds = min_interval_seconds
+        self._stage = "PROFILING"
+        self._total = 0
+        self._last_write = 0.0
+
+    def start(self, stage: str, total: int = 0) -> None:
+        self._stage = stage
+        self._total = total
+        self._write(0)
+
+    def set_total(self, total: int) -> None:
+        self._total = total
+
+    def advance(self, processed: int) -> None:
+        """Throttled; the final row of a stage is always written."""
+        if processed >= self._total > 0 or (
+            monotonic() - self._last_write >= self.min_interval_seconds
+        ):
+            self._write(processed)
+
+    def _write(self, processed: int) -> None:
+        low, high = _STAGE_SPAN.get(self._stage, (0, 0))
+        fraction = min(processed / self._total, 1) if self._total else 0
+        self._last_write = monotonic()
+        self.repositories.update_job(self.job_id, {"progress": {
+            "stage": self._stage,
+            "processed": processed,
+            # Zero means the stage size is not known yet (workbook still streaming).
+            "total": self._total,
+            "unit": "AGENT_CALLS" if self._stage == "PROCESSING_DESCRIPTIONS" else "ROWS",
+            "percent": round(low + (high - low) * fraction),
+        }})
+
+
 class JobProcessor:
     def __init__(
         self,
@@ -128,6 +192,7 @@ class JobProcessor:
         self.rule_engine = RuleEngine(registry, default_rounding_decimals)
         self.group_a_validator = GroupAValidator(self.group_b_rule_engine)
         self.pack_size_service = PackSizeService()
+        self.quality_service = QualityService(registry)
         self.ai_max_concurrency = ai_max_concurrency
         self.pack_size_inference_enabled = pack_size_inference_enabled
 
@@ -147,9 +212,9 @@ class JobProcessor:
         selected = set(job["selected_departments"])
         started = perf_counter()
         _log_event("job.processing_started", job_id=job_id, selected_departments=sorted(selected))
-        self.repositories.update_job(job_id, {
-            "status": "PROCESSING", "progress.stage": "PROFILING", "error": None
-        })
+        self.repositories.update_job(job_id, {"status": "PROCESSING", "error": None})
+        progress = ProgressReporter(self.repositories, job_id)
+        progress.start("PROFILING")
 
         counts: Counter[str] = Counter()
         source_counts: Counter[str] = Counter()
@@ -157,8 +222,11 @@ class JobProcessor:
         group_c: list[tuple[int, InputProduct]] = []
         group_b_pack_candidates: list[tuple[int, InputProduct, Decimal | str | None, str | None]] = []
         selected_rows: list[WorkbookRow] = []
-        for workbook_row in self.reader.iter_rows(self.storage.get_input_path(job_id)):
+        for workbook_row in self.reader.iter_rows(
+            self.storage.get_input_path(job_id), on_total=progress.set_total,
+        ):
             counts["workbook_rows"] += 1
+            progress.advance(counts["workbook_rows"])
             product = workbook_row.product
             if product.department not in selected:
                 continue
@@ -168,18 +236,25 @@ class JobProcessor:
         item_number_counts = Counter(
             row.product.item_no for row in selected_rows if row.product.item_no
         )
-        for workbook_row in selected_rows:
+        progress.start("PROCESSING_RULES", len(selected_rows))
+        for row_index, workbook_row in enumerate(selected_rows, start=1):
+            progress.advance(row_index)
             product = workbook_row.product
             purged = is_purged(workbook_row.raw)
             group = classify(product, purged=purged)
             validation: GroupAValidationResult | None = None
+            discrepancies: DiscrepancyReport | None = None
             if not purged:
+                # One multi-signal extraction per row feeds both Group A
+                # validation and the persisted discrepancy record.
+                discrepancies = analyze_discrepancies(product)
                 validation = self.group_a_validator.validate(
                     workbook_row,
                     duplicate_item_number=(
                         bool(product.item_no)
                         and item_number_counts[product.item_no] > 1
                     ),
+                    discrepancies=discrepancies,
                 )
                 if validation is not None:
                     if validation.status == GroupAValidationStatus.VALID:
@@ -197,7 +272,7 @@ class JobProcessor:
             counts[f"group_{group.value.lower()}"] += 1
             if validation and validation.has_warnings and group == WorkGroup.A:
                 counts["group_a_validation_warnings"] += 1
-            item = self._base_item(job_id, workbook_row, group, validation)
+            item = self._base_item(job_id, workbook_row, group, validation, discrepancies)
 
             if group == WorkGroup.B:
                 if validation and validation.status == GroupAValidationStatus.AUTO_FIX:
@@ -318,17 +393,35 @@ class JobProcessor:
                 item["review"] = self._pending_review(size_uom=True, pack=True)
             items.append(item)
 
-        self.repositories.update_job(job_id, {"progress.stage": "PROCESSING_DESCRIPTIONS"})
-        if group_b_pack_candidates:
-            asyncio.run(self._infer_group_b_pack(items, group_b_pack_candidates))
-        if group_c:
-            asyncio.run(self._infer_group_c(items, group_c))
+        progress.start(
+            "PROCESSING_DESCRIPTIONS", len(group_b_pack_candidates) + len(group_c)
+        )
+        agent_calls_done = 0
 
-        self.repositories.update_job(job_id, {"progress.stage": "CHECKING_DISCREPANCIES"})
+        def agent_call_finished() -> None:
+            nonlocal agent_calls_done
+            agent_calls_done += 1
+            progress.advance(agent_calls_done)
+
+        if group_b_pack_candidates:
+            asyncio.run(self._infer_group_b_pack(
+                items, group_b_pack_candidates, agent_call_finished,
+            ))
+        if group_c:
+            asyncio.run(self._infer_group_c(items, group_c, agent_call_finished))
+
+        # Materialize a stable result contract only after deterministic and
+        # agent phases have finished populating proposals and provenance.
+        items = [enrich_result_item(item) for item in items]
+
+        progress.start("CHECKING_DISCREPANCIES")
         discrepancies = 0
         for item in items:
             if item["discrepancy"]["flagged"]:
                 discrepancies += 1
+            for detail in item["discrepancy"]["details"]:
+                if detail["status"] == "CONFLICT":
+                    counts[f"discrepancy_{detail['scope'].lower()}_{detail['aspect'].lower()}"] += 1
         counts["discrepancies"] = discrepancies
         for item in items:
             pack_result = item.get("pack_result") or {}
@@ -353,6 +446,8 @@ class JobProcessor:
             "group_a_validation_warnings": counts["group_a_validation_warnings"],
             "data_shape_error": counts["group_data_shape_error"],
             "discrepancies": discrepancies,
+            "discrepancy_bilingual_measurement_conflicts": counts["discrepancy_bilingual_pair_measurement"],
+            "discrepancy_bilingual_count_conflicts": counts["discrepancy_bilingual_pair_count"],
             "pack_existing_valid": counts["pack_existing_valid"],
             "pack_normalized_existing": counts["pack_normalize_existing"],
             "pack_deterministic_proposed": counts["pack_deterministic_proposal"],
@@ -373,8 +468,10 @@ class JobProcessor:
             if differences:
                 raise ValueError(f"v0.2 profile invariant failed: {differences}")
 
+        progress.start("SAVING_RESULTS", len(items))
         for offset in range(0, len(items), 1000):
             self.repositories.replace_items(items[offset:offset + 1000])
+            progress.advance(min(offset + 1000, len(items)))
         covered = sorted(source for source in source_counts if self.registry.get(source))
         uncovered = sorted(source for source in source_counts if not self.registry.get(source))
         readiness = {
@@ -393,12 +490,15 @@ class JobProcessor:
                 "alias_checksum": STANDARD_UOM_ALIAS_CHECKSUM,
                 "group_b_rounding": "EXCEL_NEAREST_WHOLE",
                 "pack_extraction_version": PACK_EXTRACTION_VERSION,
+                "discrepancy_engine_version": DISCREPANCY_ENGINE_VERSION,
+                "packaging_expression_version": PACKAGING_EXPRESSION_VERSION,
                 "pack_agent_fallback_enabled": self.pack_size_inference_enabled,
             },
             "rule_readiness": readiness,
+            "quality": self.quality_service.build_report(job, items),
             "progress": {
                 "stage": "READY_FOR_REVIEW", "processed": stats["live"],
-                "total": stats["live"], "percent": 100,
+                "total": stats["live"], "unit": "ROWS", "percent": 100,
             },
         })
         _log_event(
@@ -414,8 +514,8 @@ class JobProcessor:
         row: WorkbookRow,
         group: WorkGroup,
         validation: GroupAValidationResult | None = None,
+        discrepancies: DiscrepancyReport | None = None,
     ) -> dict[str, Any]:
-        details = [] if group == WorkGroup.SKIPPED_PURGED else find_discrepancies(row.product)
         return {
             "job_id": job_id,
             "row_number": row.row_number,
@@ -437,7 +537,10 @@ class JobProcessor:
             "evidence": [],
             "confidence": None,
             "validation": validation.as_dict() if validation else None,
-            "discrepancy": {"flagged": bool(details), "details": details},
+            "discrepancy": (
+                discrepancies.as_dict() if discrepancies
+                else {"version": DISCREPANCY_ENGINE_VERSION, "flagged": False, "details": [], "signals": {}}
+            ),
             "review": self._not_required_review(),
         }
 
@@ -493,6 +596,7 @@ class JobProcessor:
         self,
         items: list[dict[str, Any]],
         candidates: list[tuple[int, InputProduct, Decimal | str | None, str | None]],
+        on_done: Callable[[], None] = lambda: None,
     ) -> None:
         semaphore = asyncio.Semaphore(self.ai_max_concurrency)
 
@@ -566,12 +670,20 @@ class JobProcessor:
                     duration_ms=round((perf_counter() - started) * 1000),
                 )
 
-        await asyncio.gather(*(
-            infer(index, product, standard_size, standard_uom)
-            for index, product, standard_size, standard_uom in candidates
-        ))
+        async def tracked(*candidate: Any) -> None:
+            try:
+                await infer(*candidate)
+            finally:
+                on_done()
 
-    async def _infer_group_c(self, items: list[dict[str, Any]], candidates: list[tuple[int, InputProduct]]) -> None:
+        await asyncio.gather(*(tracked(*candidate) for candidate in candidates))
+
+    async def _infer_group_c(
+        self,
+        items: list[dict[str, Any]],
+        candidates: list[tuple[int, InputProduct]],
+        on_done: Callable[[], None] = lambda: None,
+    ) -> None:
         semaphore = asyncio.Semaphore(self.ai_max_concurrency)
 
         async def infer(index: int, product: InputProduct) -> None:
@@ -738,4 +850,10 @@ class JobProcessor:
                     duration_ms=round((perf_counter() - started) * 1000),
                 )
 
-        await asyncio.gather(*(infer(index, product) for index, product in candidates))
+        async def tracked(*candidate: Any) -> None:
+            try:
+                await infer(*candidate)
+            finally:
+                on_done()
+
+        await asyncio.gather(*(tracked(*candidate) for candidate in candidates))

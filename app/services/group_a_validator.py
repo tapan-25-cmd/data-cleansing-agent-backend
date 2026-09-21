@@ -8,13 +8,22 @@ from hashlib import sha256
 import json
 from typing import Any
 
-from app.services.discrepancy_service import extract_signal, find_discrepancies
+from app.services.discrepancy_service import (
+    DiscrepancyReport,
+    analyze_discrepancies,
+    matches_value,
+    packaging_levels,
+)
 from app.services.excel_reader import FIELD_MAP, WorkbookRow
 from app.services.normalization import blank
+from app.services.packaging_expression_service import (
+    extract_packaging_expressions,
+    matching_interpretations,
+)
 from app.services.rule_engine import RuleEngine
 
 
-GROUP_A_VALIDATION_VERSION = "group-a-validation-v1"
+GROUP_A_VALIDATION_VERSION = "group-a-validation-v2"
 STANDARD_UOM_ALIAS_VERSION = "standard-uom-aliases-v1"
 
 
@@ -111,16 +120,6 @@ STANDARD_UOM_ALIAS_CHECKSUM = sha256(
 ).hexdigest()
 
 
-DESCRIPTION_FIELDS = (
-    ("item_brand_eng", "item_brand_eng"),
-    ("item_brand_local_lang", "item_brand_local"),
-    ("item_desc_eng", "item_desc_eng"),
-    ("item_desc_local_lang", "item_desc_local"),
-    ("web_description_eng", "web_description_eng"),
-    ("web_description_chi", "web_description_chi"),
-)
-
-
 def _json_value(value: object) -> object:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -194,6 +193,7 @@ class GroupAValidator:
         row: WorkbookRow,
         *,
         duplicate_item_number: bool = False,
+        discrepancies: DiscrepancyReport | None = None,
     ) -> GroupAValidationResult | None:
         raw_size = row.raw.get(FIELD_MAP["standard_size"])
         raw_uom = row.raw.get(FIELD_MAP["standard_uom"])
@@ -258,17 +258,68 @@ class GroupAValidator:
 
         if not invalid:
             issues.extend(self._legacy_issues(row, checked_size, canonical_uom))
-            conflicts = find_discrepancies(row.product)
+            report = discrepancies or analyze_discrepancies(row.product)
+            # Only an explicit bilingual *measurement* conflict disqualifies a row
+            # from Group A. A bilingual count conflict is a packaging-level
+            # question that the result ledger raises for review without
+            # re-classifying the row.
+            conflicts = [
+                conflict for conflict in report.bilingual_conflicts
+                if conflict["aspect"] == "MEASUREMENT"
+            ]
             for conflict in conflicts:
                 issues.append(ValidationIssue(
                     "BILINGUAL_DESCRIPTION_CONFLICT",
                     str(conflict.get("pair") or "description"),
                     ValidationSeverity.ERROR,
                     "Paired description fields contain conflicting explicit measurements",
-                    conflict,
+                    "; ".join(
+                        f"{signal['fragment']} ({signal['field']})"
+                        for signal in conflict["left_signals"]
+                    ),
+                    "; ".join(
+                        f"{signal['fragment']} ({signal['field']})"
+                        for signal in conflict["right_signals"]
+                    ),
                 ))
-            issues.extend(self._description_warnings(row, checked_size, canonical_uom))
-            if conflicts:
+            packaging_expressions = extract_packaging_expressions(row.product)
+            supported_packaging_fields: set[str] = set()
+            ambiguous_packaging = False
+            for expression in packaging_expressions:
+                matches = matching_interpretations(
+                    expression,
+                    standard_size=checked_size,
+                    standard_uom=canonical_uom,
+                    standard_pack_size=checked_pack,
+                )
+                if matches:
+                    supported_packaging_fields.add(expression.field)
+                else:
+                    ambiguous_packaging = True
+                    issues.append(ValidationIssue(
+                        "PACKAGING_HIERARCHY_AMBIGUOUS",
+                        expression.field,
+                        ValidationSeverity.WARNING,
+                        "Existing K/L/M does not match an approved interpretation of the package expression",
+                        expression.as_dict(),
+                        list(expression.candidates()),
+                    ))
+            # English/local descriptions are a semantic pair. If a structured
+            # expression in one side already explains K/L/M, suppress the
+            # first-measurement warning on its translated partner as well.
+            # A real value conflict is still caught above by the discrepancy engine.
+            if supported_packaging_fields & {"web_description_eng", "web_description_chi"}:
+                supported_packaging_fields.update({"web_description_eng", "web_description_chi"})
+            if supported_packaging_fields & {"item_desc_eng", "item_desc_local_lang"}:
+                supported_packaging_fields.update({"item_desc_eng", "item_desc_local_lang"})
+            issues.extend(self._description_warnings(
+                report,
+                checked_size,
+                canonical_uom,
+                checked_pack,
+                excluded_fields=supported_packaging_fields,
+            ))
+            if conflicts or ambiguous_packaging:
                 return GroupAValidationResult(
                     GroupAValidationStatus.REVIEW,
                     checked_size,
@@ -313,41 +364,82 @@ class GroupAValidator:
                 "Legacy conversion targets a different standardized UOM",
                 standard_uom, proposal.standard_uom,
             )]
-        if proposal.standard_size != standard_size:
+        # Group B conversions intentionally use Excel-style nearest-whole
+        # rounding. Group A validation must not apply that rounding to an
+        # identity comparison (for example 4.5 GM -> GM), otherwise a correct
+        # existing decimal becomes a false 5 GM mismatch.
+        expected_size = (
+            proposal.raw_target
+            if proposal.source_uom == proposal.target_uom
+            and proposal.factor == Decimal("1")
+            else proposal.standard_size
+        )
+        if expected_size != standard_size:
+            difference = abs(expected_size - standard_size)
+            identity = (
+                proposal.source_uom == proposal.target_uom
+                and proposal.factor == Decimal("1")
+            )
+            if not identity and difference <= Decimal("1"):
+                return [ValidationIssue(
+                    "ROUNDING_ONLY_VARIANCE",
+                    "standard_size",
+                    ValidationSeverity.INFO,
+                    "Existing standardized size is within the approved one-unit conversion tolerance",
+                    str(standard_size),
+                    str(expected_size),
+                )]
             return [ValidationIssue(
-                "LEGACY_SIZE_MISMATCH", "standard_size", ValidationSeverity.WARNING,
-                "Existing standardized size differs from the rounded legacy conversion",
-                str(standard_size), str(proposal.standard_size),
+                "SIGNIFICANT_LEGACY_SIZE_MISMATCH", "standard_size", ValidationSeverity.WARNING,
+                (
+                    "Existing standardized size differs from the exact legacy value"
+                    if identity
+                    else "Existing standardized size differs from the rounded legacy conversion"
+                ),
+                str(standard_size), str(expected_size),
             )]
         return []
 
     @staticmethod
     def _description_warnings(
-        row: WorkbookRow,
+        report: DiscrepancyReport,
         standard_size: Decimal,
         standard_uom: str,
+        standard_pack_size: Decimal,
+        *,
+        excluded_fields: set[str] | None = None,
     ) -> list[ValidationIssue]:
         if standard_uom not in {"GM", "ML"}:
             return []
         expected_dimension = "WEIGHT" if standard_uom == "GM" else "VOLUME"
+        # A description may state the per-unit size or the whole-pack total, so
+        # both K and K x M are acceptable readings of the existing values.
+        accepted = {standard_size, standard_size * standard_pack_size}
         issues: list[ValidationIssue] = []
-        for evidence_field, product_attribute in DESCRIPTION_FIELDS:
-            signal = extract_signal(
-                evidence_field,
-                getattr(row.product, product_attribute),
-            )
-            if signal is None:
+        excluded_fields = excluded_fields or set()
+        for evidence_field, signals in report.signals.items():
+            if evidence_field in excluded_fields or not signals.measurements:
                 continue
-            rounded_evidence = signal.value.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-            if signal.dimension != expected_dimension or (
-                signal.value != standard_size and rounded_evidence != standard_size
-            ):
+            # Every measurement in the field is considered, at every packaging
+            # level the same text states, before a mismatch is reported.
+            converted = any(
+                signal.source_uom != signal.uom for signal in signals.measurements
+            )
+            supported = any(
+                dimension == expected_dimension
+                and matches_value(value, target, converted=converted)
+                for dimension, value in packaging_levels(
+                    signals.measurements, signals.counts,
+                )
+                for target in accepted
+            )
+            if not supported:
                 issues.append(ValidationIssue(
                     "DESCRIPTION_MEASUREMENT_MISMATCH",
                     evidence_field,
                     ValidationSeverity.WARNING,
                     "Explicit description measurement differs from existing K/L",
-                    signal.fragment,
+                    "; ".join(signal.fragment for signal in signals.measurements),
                     f"{standard_size} {standard_uom}",
                 ))
         return issues

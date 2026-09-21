@@ -3,7 +3,14 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook
 
-from app.services.excel_reader import ExcelReader, FIELD_MAP, INPUT_SHEET, PURGE_HEADERS, WorkbookValidationError
+from app.services.excel_reader import (
+    ExcelReader,
+    FIELD_MAP,
+    INPUT_SHEET,
+    OUT_OF_SCOPE_DECISION_HEADERS,
+    PURGE_HEADERS,
+    WorkbookValidationError,
+)
 
 
 def make_workbook(path: Path, missing: str | None = None) -> None:
@@ -58,3 +65,28 @@ def test_missing_header_fails_before_processing(tmp_path: Path):
     make_workbook(path, missing="Standardize UOM")
     with pytest.raises(WorkbookValidationError, match="Standardize UOM"):
         list(ExcelReader().iter_rows(path))
+
+
+def test_derived_product_descriptions_are_preserved_raw_but_not_decision_inputs(tmp_path: Path):
+    path = tmp_path / "input.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = INPUT_SHEET
+    headers = sorted(set(FIELD_MAP.values()) | PURGE_HEADERS | OUT_OF_SCOPE_DECISION_HEADERS)
+    sheet.append(headers)
+    values = {header: None for header in headers}
+    values.update({
+        "Item_no": "000123",
+        "Department": "03_Grocery 2",
+        "product_description": "DERIVED 999KG",
+        "product_description_local": "DERIVED LOCAL 888L",
+    })
+    sheet.append([values[header] for header in headers])
+    workbook.save(path)
+
+    row = next(ExcelReader().iter_rows(path))
+
+    assert row.raw["product_description"] == "DERIVED 999KG"
+    assert row.raw["product_description_local"] == "DERIVED LOCAL 888L"
+    assert "product_description" not in type(row.product).model_fields
+    assert "product_description_local" not in type(row.product).model_fields

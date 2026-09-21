@@ -27,7 +27,7 @@ because R1 forbids web search, external product lookups, and model-driven calcul
 ## 2. Planned files
 
 ```text
-app/agents/
+backend/app/agents/
 ├── provider.py                    # framework-neutral request/result contract
 ├── factory.py                     # selects mock or ADK; validates configuration
 ├── mock_provider.py               # deterministic tests/local fallback
@@ -36,7 +36,7 @@ app/agents/
 └── prompts/
     └── uom_inference_v2.md        # versioned system instruction
 
-tests/
+backend/tests/
 ├── unit/
 │   ├── test_agent_factory.py
 │   ├── test_adk_response_validation.py

@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -9,6 +10,7 @@ from app.domain.enums import R1_DEPARTMENTS
 from app.repositories.mongo import MongoRepositories
 from app.services.excel_reader import ExcelReader, WorkbookValidationError
 from app.services.processor import JobProcessor
+from app.services.result_status import effective_status, status_query
 from app.storage.local import LocalFileStorage, UploadTooLargeError
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -93,6 +95,85 @@ def get_summary(job_id: str, repos: Annotated[MongoRepositories, Depends(reposit
         "rule_readiness": job.get("rule_readiness", {}),
         "pending_review": repos.pending_count(job_id),
     }
+
+
+@router.get("/{job_id}/results")
+def list_results(
+    job_id: str,
+    repos: Annotated[MongoRepositories, Depends(repositories)],
+    group: str | None = None,
+    status: Literal[
+        "NO_CHANGE", "AUTO_APPLY", "REVIEW_REQUIRED", "OBSERVATION_ONLY", "UNRESOLVED", "SKIPPED"
+    ] | None = None,
+    review_status: Literal[
+        "NOT_REQUIRED", "PENDING", "APPROVED", "REJECTED", "OVERRIDDEN"
+    ] | None = None,
+    finding_category: str | None = None,
+    finding_severity: str | None = None,
+    changed_field: Literal[
+        "standard_size", "standard_uom", "standard_pack_size"
+    ] | None = None,
+    search: Annotated[str | None, Query(max_length=100)] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> dict:
+    if not repos.get_job(job_id):
+        raise HTTPException(404, "Job not found")
+    query: dict[str, object] = {}
+    if group:
+        query["group"] = group
+    if status:
+        query.update(status_query(status))
+    if review_status:
+        query["review.overall_status"] = review_status
+    if finding_category:
+        query["findings.category"] = finding_category
+    if finding_severity:
+        query["findings.severity"] = finding_severity
+    if changed_field:
+        query["changes"] = {"$elemMatch": {
+            "field": changed_field,
+            "proposed": {"$ne": None},
+        }}
+    if search and search.strip():
+        safe = re.escape(search.strip())
+        query["$or"] = [
+            {"item_no": {"$regex": safe, "$options": "i"}},
+            {"context.item_desc_eng": {"$regex": safe, "$options": "i"}},
+            {"context.web_description_eng": {"$regex": safe, "$options": "i"}},
+        ]
+    rows, total = repos.list_items(
+        job_id,
+        query,
+        (page - 1) * page_size,
+        page_size,
+    )
+    for row in rows:
+        row["status"] = effective_status(row)
+    return {"items": rows, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/{job_id}/result-facets")
+def result_facets(
+    job_id: str,
+    repos: Annotated[MongoRepositories, Depends(repositories)],
+) -> dict:
+    if not repos.get_job(job_id):
+        raise HTTPException(404, "Job not found")
+    return {"facets": repos.result_facets(job_id)}
+
+
+@router.get("/{job_id}/items/{row_number}")
+def get_result_item(
+    job_id: str,
+    row_number: int,
+    repos: Annotated[MongoRepositories, Depends(repositories)],
+) -> dict:
+    item = repos.get_item(job_id, row_number)
+    if not item:
+        raise HTTPException(404, "Result item not found")
+    item["status"] = effective_status(item)
+    return item
 
 
 @router.get("/{job_id}/items")

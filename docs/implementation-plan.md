@@ -6,12 +6,6 @@
 
 **Audience:** Codex / implementation agent, backend engineer, frontend engineer, QA.
 
-**Repository note (16 Sep 2026):** The implementation was subsequently split into
-separate backend and frontend repositories. This document remains the complete product
-and architecture plan in the backend repository. Historical monorepo paths are retained
-where they explain the original design; current backend paths begin at `app/` and
-`tests/`, and the React application lives in the companion frontend repository.
-
 **POC scope amendment (15 Sep 2026):** The unit-mapping administration/approval UI is
 deferred. Deterministic rules are maintained as a validated, version-controlled ruleset
 in the repository. Row-level A/B/C results remain visible as a read-only inspection panel.
@@ -665,7 +659,7 @@ Pack-size inference applies to the same 225 blank rows as scopes 2a/2b. A B2 row
 ## 10.3 Deterministic unit rules are code-managed
 
 Do not create a `unit_mappings` MongoDB collection. Store the deterministic rules in
-`app/rules/unit_mappings.v1.yaml` and commit every change through the normal
+`backend/app/rules/unit_mappings.v1.yaml` and commit every change through the normal
 code-review process.
 
 ```yaml
@@ -1259,7 +1253,7 @@ rollout design is specified in [`docs/adk-agent-design.md`](adk-agent-design.md)
 ### 20.2.1 Real ADK agent boundary
 
 Define `uom_description_inference_agent` in
-`app/agents/uom_inference_agent.py` using:
+`backend/app/agents/uom_inference_agent.py` using:
 
 - a required, environment-pinned Gemini model;
 - Pydantic `input_schema` and `output_schema`;

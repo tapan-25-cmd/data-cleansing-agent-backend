@@ -1,0 +1,142 @@
+version: business-decisions-v2
+# Open questions shown to stakeholders on the Agent performance page.
+#
+# `counts_from` ties a decision to the products it affects in a processed workbook:
+#   benchmark:<capability>:<kind>  blind-test disagreements (SIZE, UNIT, PACK)
+#   finding:<CODE>                 rows carrying that review finding
+#   reason:<CODE>                  rows with that reason code
+#   pack_clue_needs_policy | left_blank_no_information | ai_reading_eligible
+#
+# To record an answer set `status: DECIDED` and a `decided_note`. For a benchmark
+# decision also set `resolution` (AGENT_CORRECT or EXCEL_CORRECT); those products then
+# count for or against the agent instead of waiting.
+decisions:
+  - id: legacy_size_disagrees
+    title: When the legacy size and the Excel size disagree, which one is right?
+    why_it_matters: >-
+      For these products the agent's conversion of the legacy size does not match the
+      size in Excel. One of the two is wrong, and we cannot tell which without you.
+    options:
+      - The legacy size is right — correct Excel to the converted value
+      - The Excel size is right — keep Excel and ignore the legacy size
+      - Decide product by product in review
+    unlocks: Scores these products for or against the agent in unit conversion.
+    counts_from: benchmark:unit_conversion:SIZE
+
+  - id: legacy_unit_different_kind
+    title: The legacy unit and the Excel unit measure different things. Which do we trust?
+    why_it_matters: >-
+      The legacy data says, for example, pieces, while Excel holds grams. A count cannot
+      be converted into a weight, so the two sources describe the product differently.
+    options:
+      - Trust Excel — the legacy unit describes how the item is sold, not its size
+      - Trust the legacy unit
+      - Decide product by product in review
+    unlocks: Scores these products for or against the agent in unit conversion.
+    counts_from: benchmark:unit_conversion:UNIT
+
+  - id: pack_size_disagrees
+    title: The description states one pack size and Excel holds another. Which is right?
+    why_it_matters: >-
+      The product text clearly says a pack count (for example "4 x 200ML"), but the pack
+      size in Excel is different.
+    options:
+      - The description is right
+      - The Excel pack size is right
+      - Decide product by product in review
+    unlocks: Scores these products for or against the agent in pack size.
+    counts_from: benchmark:pack_size:PACK
+
+  - id: ai_size_disagrees
+    title: The AI read one size from the description and Excel holds another. Which is right?
+    why_it_matters: >-
+      The description clearly states a size, the AI read it, and it does not match the
+      size in Excel. Either the description or the Excel value is out of date.
+    options:
+      - The description is right — correct Excel
+      - The Excel size is right — the description is out of date
+      - Decide product by product in review
+    unlocks: Scores these products for or against the AI in description reading.
+    counts_from: benchmark:ai_description_reading:SIZE
+
+  - id: ai_unit_disagrees
+    title: The AI read a weight where Excel holds a volume (or the reverse). Which is right?
+    why_it_matters: >-
+      The description states, for example, 650 grams while Excel holds 650 millilitres.
+      These are different kinds of measurement, so one of the two is wrong.
+    options:
+      - The description is right — correct Excel
+      - The Excel unit is right
+      - Decide product by product in review
+    unlocks: Scores these products for or against the AI in description reading.
+    counts_from: benchmark:ai_description_reading:UNIT
+
+  - id: case_pack_meaning
+    title: For case packs, is the size per unit, per inner pack, or per case?
+    why_it_matters: >-
+      Wording such as "5 CASE/10 X 90GM" is entered in different ways today. Until the
+      meaning of size and pack size is fixed, the agent will not change these products.
+    options:
+      - Size is per single unit; pack size is the number of units
+      - Size is the total of the inner pack
+      - Another definition (please specify)
+    unlocks: Lets the agent check and correct case-pack products automatically.
+    counts_from: finding:PACKAGING_HIERARCHY_AMBIGUOUS
+
+  - id: loose_piece_counts
+    title: Does "1PC" or "12S" in a description count as the pack size?
+    why_it_matters: >-
+      A piece count can mean the sellable pack or simply what is inside the product
+      (a gift box, a coupon). The agent does not fill the pack size from these today.
+    options:
+      - Yes — use it as the pack size
+      - No — leave the pack size blank
+      - Only for specific product types (please specify)
+    unlocks: Pack size for products that only carry a loose piece count.
+    counts_from: pack_clue_needs_policy
+
+  - id: units_without_conversion
+    title: Some units have no agreed conversion (for example FZ, ST, SET). What should they become?
+    why_it_matters: >-
+      The agent never invents a conversion factor. Products using these units are left
+      unchanged until a rule is agreed.
+    options:
+      - Provide the conversion for each unit
+      - Leave these products for manual entry
+    unlocks: Automatic conversion for every product using these units.
+    counts_from: reason:NO_RULE
+
+  - id: language_pack_conflict
+    title: The English and local-language text state different pack counts. Which text is right?
+    why_it_matters: >-
+      The two languages describe the same product differently, often because of a
+      typing error in one of them. The agent never picks a winner.
+    options:
+      - Correct the source text, then re-run
+      - Decide product by product in review
+    unlocks: Removes these products from the review list.
+    counts_from: finding:PACK_COUNT_CONFLICT
+
+  - id: left_blank_is_correct
+    title: Confirm that leaving these products blank was the right call
+    why_it_matters: >-
+      Neither the legacy data nor any description states a size for these products, so
+      the agent left them blank rather than guess. Confirming this lets us report how
+      reliably the agent knows when not to guess.
+    options:
+      - Confirmed — blank is correct; sizes must come from another source
+      - Not confirmed — a size should have been found (please give examples)
+    unlocks: A "knows when not to guess" score.
+    counts_from: left_blank_no_information
+
+  - id: approve_ai_reading_test
+    title: Approve a test of how well the AI reads sizes from descriptions
+    why_it_matters: >-
+      These already-correct products have the size written in their description. We can
+      show the AI only that text and compare its answer with the known size. It is run
+      on request because each product is one paid AI call.
+    options:
+      - Approve the test on all of these products
+      - Approve a smaller sample
+    unlocks: The AI description-reading score.
+    counts_from: ai_reading_eligible

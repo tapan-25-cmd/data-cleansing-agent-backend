@@ -6,7 +6,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.api.dependencies import repositories
 from app.domain.enums import BASE_UNITS
-from app.repositories.mongo import MongoRepositories
+from app.repositories.mongo import MongoRepositories, now
+from app.services.result_ledger_service import changes_after_review
 
 router = APIRouter(prefix="/jobs", tags=["review"])
 REVIEW_FIELDS = frozenset({"standard_size", "standard_uom", "standard_pack_size"})
@@ -31,7 +32,8 @@ class ItemDecision(BaseModel):
 
 def _refresh_job_status(repos: MongoRepositories, job_id: str) -> None:
     status = "READY_TO_EXPORT" if repos.pending_count(job_id) == 0 else "REVIEW_IN_PROGRESS"
-    repos.update_job(job_id, {"status": status})
+    # A review decision changes the workload figures, so the cached report is dropped.
+    repos.update_job(job_id, {"status": status, "quality": None})
 
 
 @router.post("/{job_id}/conversion-groups/{rule_id}/approve")
@@ -46,6 +48,31 @@ def approve_group(
     approved, skipped = repos.approve_conversion_group(job_id, rule_id)
     _refresh_job_status(repos, job_id)
     return {"approved": approved, "skipped": skipped}
+
+
+class Verification(BaseModel):
+    # None withdraws a verdict.
+    verdict: Literal["CORRECT", "WRONG"] | None
+    comment: str | None = Field(default=None, max_length=500)
+
+
+@router.patch("/{job_id}/items/{row_number}/verification")
+def verify_item(
+    job_id: str,
+    row_number: int,
+    payload: Verification,
+    repos: Annotated[MongoRepositories, Depends(repositories)],
+) -> dict[str, object]:
+    """A reviewer's verdict on what the agent produced for this product.
+
+    It never changes K/L/M or the export. It only feeds the accuracy figures."""
+    verification = None if payload.verdict is None else {
+        "verdict": payload.verdict, "comment": payload.comment, "verified_at": now(),
+    }
+    if not repos.update_item(job_id, row_number, {"verification": verification}):
+        raise HTTPException(404, "Item not found")
+    repos.update_job(job_id, {"quality": None})
+    return {"row_number": row_number, "verdict": payload.verdict}
 
 
 @router.patch("/{job_id}/items/{row_number}/decision")
@@ -90,12 +117,14 @@ def decide_item(
             "review.override_values": values,
             "review.overall_status": "OVERRIDDEN",
             "method": "HUMAN_OVERRIDE",
+            "changes": changes_after_review(item, "OVERRIDDEN", values),
         })
         for field in values:
             updates[f"review.field_decisions.{field}"] = "OVERRIDDEN"
     else:
         decision = "APPROVED" if payload.action == "APPROVE" else "REJECTED"
         updates["review.overall_status"] = decision
+        updates["changes"] = changes_after_review(item, decision)
         for field in fields:
             updates[f"review.field_decisions.{field}"] = decision
     repos.update_item(job_id, row_number, updates)

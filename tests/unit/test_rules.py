@@ -9,10 +9,14 @@ from app.services.rule_engine import RuleEngine
 
 def test_default_ruleset_is_versioned_and_excludes_unresolved_units():
     registry = load_default_registry()
-    assert registry.version == "poc-v1"
+    assert registry.version == "poc-v2"
     assert len(registry.checksum) == 64
     assert registry.get("kg").rule_id == "KG_TO_GM"
     assert registry.get("Pack").rule_id == "PACK_TO_EA"
+    # The AI reports units exactly as written, including local-language spellings.
+    for written, rule_id in (("克", "G_TO_GM"), ("公斤", "KG_TO_GM"), ("毫升", "ML_IDENTITY"),
+                             ("公升", "LT_TO_ML"), ("安士", "OZ_TO_GM"), ("磅", "LB_TO_GM")):
+        assert registry.get(written).rule_id == rule_id
     for unresolved in ("FZ", "ST", "SET", "PR", "AV KG"):
         assert registry.get(unresolved) is None
 

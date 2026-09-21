@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import Cell
@@ -12,6 +12,14 @@ from app.domain.product import InputProduct
 from app.services.normalization import blank, clean_text, clean_uom
 
 INPUT_SHEET = "UoM_Field_Extract"
+
+# PRD boundary: these derived display columns are preserved in ``WorkbookRow.raw``
+# so export can retain the source workbook exactly, but they must never be mapped
+# into ``InputProduct`` or used as cleansing evidence.
+OUT_OF_SCOPE_DECISION_HEADERS = frozenset({
+    "product_description",
+    "product_description_local",
+})
 
 FIELD_MAP = {
     "item_no": "Item_no",
@@ -87,7 +95,12 @@ def _domain_number(value: Any) -> Decimal | str | None:
 
 
 class ExcelReader:
-    def iter_rows(self, path: Path) -> Iterator[WorkbookRow]:
+    def iter_rows(
+        self,
+        path: Path,
+        on_total: Callable[[int], None] | None = None,
+    ) -> Iterator[WorkbookRow]:
+        """Stream rows; ``on_total`` receives the declared data-row count if known."""
         try:
             # Read formulas as formulas. Standardized K/L/M inputs must be fixed
             # values; the Group A validator rejects formulas explicitly instead of
@@ -113,6 +126,10 @@ class ExcelReader:
                 details.append(f"duplicate headers: {', '.join(duplicates)}")
             raise WorkbookValidationError("; ".join(details))
         header_index = {header: index for index, header in enumerate(headers) if header}
+        # The worksheet dimension is metadata, so it is only a progress hint and
+        # never an input to counting or classification.
+        if on_total is not None and isinstance(sheet.max_row, int) and sheet.max_row > 1:
+            on_total(sheet.max_row - 1)
         try:
             for row_number, row_cells in enumerate(sheet.iter_rows(min_row=2), start=2):
                 raw = {

@@ -20,6 +20,7 @@ class FakeRepositories:
     def __init__(self, job):
         self.job = job
         self.items = []
+        self.progress_updates = []
 
     def get_job(self, job_id):
         return self.job if self.job["job_id"] == job_id else None
@@ -28,6 +29,8 @@ class FakeRepositories:
         for key, value in values.items():
             if "." not in key:
                 self.job[key] = value
+        if "progress" in values:
+            self.progress_updates.append(dict(values["progress"]))
 
     def replace_items(self, documents):
         self.items.extend(documents)
@@ -77,6 +80,8 @@ def test_processor_routes_rules_and_ai_without_crossing_paths(tmp_path: Path):
         "group_b3": 0, "group_c": 1, "validation_review": 0,
         "group_a_validation_warnings": 0,
         "data_shape_error": 0, "discrepancies": 0,
+        "discrepancy_bilingual_measurement_conflicts": 0,
+        "discrepancy_bilingual_count_conflicts": 0,
         "pack_existing_valid": 0, "pack_normalized_existing": 0,
         "pack_deterministic_proposed": 0, "pack_agent_proposed": 0,
         "pack_agent_declined": 1, "pack_conflict": 0, "pack_not_found": 1,
@@ -358,3 +363,69 @@ def test_pack_agent_failure_isolated_from_b_conversion(tmp_path: Path):
     assert item["field_proposals"]["standard_pack_size"] is None
     assert item["pack_result"]["status"] == "AGENT_ERROR"
     assert item["pack_result"]["reason_code"] == "PACK_AGENT_ERROR"
+
+
+def test_progress_is_reported_while_the_job_runs(tmp_path: Path):
+    storage = LocalFileStorage(tmp_path / "files", 10_000_000)
+    job_id = "abc123"
+    fixture = tmp_path / "fixture.xlsx"
+    create_fixture(fixture)
+    with fixture.open("rb") as source:
+        storage.save_input(job_id, source)
+    repository = FakeRepositories({
+        "job_id": job_id,
+        "selected_departments": ["03_Grocery 2", "06_Dairy & Frozen"],
+        "snapshot_label": None,
+    })
+    JobProcessor(repository, storage, load_default_registry(), MockInferenceProvider()).process(job_id)
+
+    updates = repository.progress_updates
+    stages = list(dict.fromkeys(update["stage"] for update in updates))
+    assert stages == [
+        "PROFILING", "PROCESSING_RULES", "PROCESSING_DESCRIPTIONS",
+        "CHECKING_DISCREPANCIES", "SAVING_RESULTS", "READY_FOR_REVIEW",
+    ]
+    # Every stage with a known size reports its final row before the next begins.
+    rules = [update for update in updates if update["stage"] == "PROCESSING_RULES"]
+    assert rules[0]["processed"] == 0 and rules[-1] == {
+        "stage": "PROCESSING_RULES", "processed": 4, "total": 4, "unit": "ROWS", "percent": 55,
+    }
+    agent = [update for update in updates if update["stage"] == "PROCESSING_DESCRIPTIONS"]
+    assert agent[-1]["processed"] == agent[-1]["total"] == 1
+    assert agent[-1]["unit"] == "AGENT_CALLS"
+    percents = [update["percent"] for update in updates]
+    assert percents == sorted(percents) and percents[-1] == 100
+
+
+def test_count_conflict_requires_review_without_changing_the_group(tmp_path: Path):
+    storage = LocalFileStorage(tmp_path / "files", 10_000_000)
+    job_id = "abc123"
+    fixture = tmp_path / "fixture.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = INPUT_SHEET
+    headers = sorted(set(FIELD_MAP.values()) | PURGE_HEADERS)
+    sheet.append(headers)
+    values = {
+        "Item_no": "226167", "Department": "06_Dairy & Frozen",
+        "item_desc_eng": "MINI DAIFUKU STRAWBERRY 9S", "item_desc_local_lang": "迷你大福草莓雪米糍3件裝",
+        "Standardize Unit Size": 30, "Standardize UOM": "ML", "Standardize Pack Size": 9,
+    }
+    sheet.append([values.get(header) for header in headers])
+    workbook.save(fixture)
+    with fixture.open("rb") as source:
+        storage.save_input(job_id, source)
+    repository = FakeRepositories({
+        "job_id": job_id, "selected_departments": ["06_Dairy & Frozen"], "snapshot_label": None,
+    })
+    JobProcessor(repository, storage, load_default_registry(), MockInferenceProvider()).process(job_id)
+
+    item = repository.items[0]
+    assert item["group"] == "A"
+    assert item["discrepancy"]["flagged"] is True
+    assert item["application_policy"] == "REVIEW_REQUIRED"
+    assert item["review"]["overall_status"] == "PENDING"
+    assert [finding["code"] for finding in item["findings"]] == ["PACK_COUNT_CONFLICT"]
+    # A conflict never proposes or applies a value.
+    assert all(change["proposed"] is None for change in item["changes"])
+    assert repository.job["stats"]["discrepancy_bilingual_count_conflicts"] == 1

@@ -1,0 +1,111 @@
+version: uom-golden-v1
+status: BUSINESS_REVIEW_REQUIRED
+description: Versioned regression cases for UoM cleansing policies.
+cases:
+  - id: identity_decimal_119321
+    item_no: "119321"
+    scenario: Exact identity conversion preserves decimals
+    category: Existing value validation
+    execution_scope: DETERMINISTIC_RULE
+    source_columns: ["I/J · Legacy size and UOM", "K/L/M · Standardized size, UOM and pack size"]
+    plain_language:
+      question: Does an already-correct decimal value remain unchanged?
+      expected_result: Keep 4.5 GM and pack size 1 exactly as entered.
+      business_decision: null
+    input:
+      legacy_size: "4.5"
+      legacy_uom: GM
+      standard_size: "4.5"
+      standard_uom: GM
+      standard_pack_size: "1"
+    expected:
+      application_policy: NO_CHANGE
+      finding_code: null
+    label_status: APPROVED
+  - id: rounding_variance_628776
+    item_no: "628776"
+    scenario: One-unit converted difference is rounding-only
+    category: Conversion rounding
+    execution_scope: DETERMINISTIC_RULE
+    source_columns: ["I/J · Legacy size and UOM", "K/L · Standardized size and UOM"]
+    plain_language:
+      question: Is a one-unit conversion difference only rounding, rather than an error?
+      expected_result: Keep 484 GM and record a note; do not overwrite Excel.
+      business_decision: null
+    input:
+      legacy_size: "17.1"
+      legacy_uom: OZ
+      standard_size: "484"
+      standard_uom: GM
+      standard_pack_size: "1"
+    expected:
+      application_policy: OBSERVATION_ONLY
+      finding_code: ROUNDING_ONLY_VARIANCE
+    label_status: APPROVED
+  - id: material_mismatch_044305
+    item_no: "044305"
+    scenario: Material converted difference requires human review
+    category: Source discrepancy
+    execution_scope: DETERMINISTIC_RULE
+    source_columns: ["I/J · Legacy size and UOM", "K/L · Standardized size and UOM"]
+    plain_language:
+      question: Should a material legacy conversion difference be automatically changed?
+      expected_result: Propose 349 GM and ask a reviewer before changing Excel.
+      business_decision:
+        title: Confirm the material legacy-size mismatch policy
+        reason: The legacy value converts to 349 GM, while Excel contains 375 GM. The business must confirm which source is authoritative.
+        decision_needed: Confirm 349 GM, retain 375 GM, or define a tolerance/source-priority rule.
+    input:
+      legacy_size: "12.3"
+      legacy_uom: OZ
+      standard_size: "375"
+      standard_uom: GM
+      standard_pack_size: "1"
+    expected:
+      application_policy: REVIEW_REQUIRED
+      proposed_standard_size: "349"
+      finding_code: SIGNIFICANT_LEGACY_SIZE_MISMATCH
+    label_status: PROPOSED
+  - id: supported_outer_total_240929
+    item_no: "240929"
+    scenario: Approved outer-total package expression
+    category: Packaging hierarchy
+    execution_scope: DETERMINISTIC_RULE
+    source_columns: ["web_description_eng", "K/L/M · Standardized size, UOM and pack size"]
+    plain_language:
+      question: Does “5 CASE/6 X 90GM” mean 90 GM per unit or 450 GM per outer case?
+      expected_result: "Preserve the approved outer-total interpretation: 450 GM with pack size 6."
+      business_decision:
+        title: Approve the outer-total package interpretation
+        reason: Package wording can describe more than one packaging level. A business owner must confirm that 450 GM × pack 6 is the intended representation.
+        decision_needed: Approve this interpretation or provide the preferred K/L/M representation.
+    input:
+      standard_size: "450"
+      standard_uom: GM
+      standard_pack_size: "6"
+      web_description_eng: 5 CASE/6 X 90GM
+    expected:
+      finding_code: null
+    label_status: PROPOSED
+  - id: ambiguous_hierarchy_241315
+    item_no: "241315"
+    scenario: Unsupported package arithmetic requires review
+    category: Packaging hierarchy
+    execution_scope: DETERMINISTIC_RULE
+    source_columns: ["web_description_eng", "K/L/M · Standardized size, UOM and pack size"]
+    plain_language:
+      question: Can “5 CASE/10 X 90GM” be represented safely with the existing K/L/M values?
+      expected_result: Do not change Excel automatically; require human review.
+      business_decision:
+        title: Define the rule for nested package counts
+        reason: The wording contains both an outer-case count and an inner-unit count, so there is more than one valid K/L/M interpretation.
+        decision_needed: Confirm whether K is per unit, per inner pack, or per outer case, and confirm M accordingly.
+    input:
+      standard_size: "18"
+      standard_uom: GM
+      standard_pack_size: "50"
+      web_description_eng: 5 CASE/10 X 90GM
+    expected:
+      application_policy: REVIEW_REQUIRED
+      finding_code: PACKAGING_HIERARCHY_AMBIGUOUS
+    label_status: PROPOSED
