@@ -26,24 +26,28 @@ from typing import Any, Iterable, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from app.agents.versions import AGENT_VERSION, PROMPT_VERSION
 from app.domain.product import InputProduct
 from app.rules.registry import RuleRegistry
+from app.services import guards
+from app.services.category_profile import CategoryProfile, CategoryView, levels_of
 from app.services.discrepancy_service import (
-    CONVERSION_TOLERANCE,
+    within_conversion_tolerance,
     extract_field_signals,
     text_check,
 )
 from app.services.pack_size_service import PackSizeService, PackStatus
+from app.services.result_status import effective_status
 from app.services.rule_engine import RuleEngine
 
 
-QUALITY_REPORT_VERSION = "quality-report-v3"
+QUALITY_REPORT_VERSION = "quality-report-v5"
 DECISIONS_PATH = (
     Path(__file__).resolve().parent.parent / "evaluations" / "business_decisions.v1.yaml"
 )
 MAX_EXAMPLES = 25
 
-_DESCRIPTION_FIELDS = (
+DESCRIPTION_FIELDS = (
     ("item_desc_eng", "item_desc_eng"),
     ("item_desc_local_lang", "item_desc_local"),
     ("web_description_eng", "web_description_eng"),
@@ -130,7 +134,7 @@ def compare_size(
         )
     if size == answer_size:
         return True, "SIZE", "Same value."
-    if converted and abs(size - answer_size) <= CONVERSION_TOLERANCE:
+    if converted and within_conversion_tolerance(size, answer_size):
         return True, "SIZE", "Same value after rounding."
     return False, "SIZE", (
         f"{given} works out to {_plain(size)} {uom}, but Excel has "
@@ -147,6 +151,18 @@ def answer_key(item: dict[str, Any]) -> tuple[Decimal | None, str, Decimal | Non
     )
 
 
+def text_states(item: dict[str, Any], size: Decimal | None, uom: str, pack: Decimal | None) -> bool:
+    """Does any description field state this size (per piece or as the pack total)?"""
+    if size is None:
+        return False
+    blind = BlindInput.from_item(item)
+    signals = [
+        extract_field_signals(field, getattr(blind, attribute))
+        for field, attribute in DESCRIPTION_FIELDS
+    ]
+    return text_check(signals, size, uom, pack)[0] == "CONFIRMED"
+
+
 def is_ai_reading_eligible(item: dict[str, Any]) -> bool:
     """An already-completed product whose description states a size in words."""
     if item.get("group") != "A":
@@ -154,7 +170,7 @@ def is_ai_reading_eligible(item: dict[str, Any]) -> bool:
     blind = BlindInput.from_item(item)
     return any(
         extract_field_signals(field, getattr(blind, attribute)).measurements
-        for field, attribute in _DESCRIPTION_FIELDS
+        for field, attribute in DESCRIPTION_FIELDS
     )
 
 
@@ -217,6 +233,33 @@ def reviewer_verdict(item: dict[str, Any], kind: str) -> bool | None:
     return None
 
 
+ASK_A_PERSON = "ASK_A_PERSON"
+
+# guard code -> (what it checks, what it does), in the order shown to stakeholders
+SAFETY_CHECKS: dict[str, tuple[str, str]] = {
+    "OUNCE_READ_AS_FLUID": (
+        "Ounces on a liquid are fluid ounces", "Converted to millilitres instead of grams"),
+    "OUNCE_MAY_BE_FLUID": (
+        "Ounces could be a weight or a volume", "Sent to a person with both values"),
+    "TEXT_CONTRADICTS_RESULT": (
+        "The product's own description disagrees with the value", "Stopped and sent to a person"),
+    "LEGACY_MAY_BE_PACK_TOTAL": (
+        "The legacy size looks like the whole pack, not one piece", "Stopped and sent to a person"),
+    "AI_MEASUREMENT_NOT_PRODUCT_SIZE": (
+        "The AI read a number that is not an amount of product (a capacity, a grade)",
+        "Refused; left blank"),
+    "AI_PACK_NEEDS_CONFIRMATION": (
+        "The AI read a pack size from loose wording (12PCS, 1PC, 4'S)",
+        "Suggested, and sent to a person to confirm"),
+    "SIZE_OUTSIDE_CATEGORY_RANGE": (
+        "A size read from text is far outside what is normal for the category",
+        "Stopped and sent to a person"),
+    "SIZE_UNUSUAL_FOR_CATEGORY": (
+        "A converted size is unusually large or small for the category", "Applied, with a note"),
+    "COUNT_IN_MEASURED_CATEGORY": (
+        "Only a count is available where products usually carry a weight", "Applied, with a note"),
+}
+
 AI_READING_KEY = "ai_description_reading"
 AI_READING_CAPABILITY = "Reads the size from the product description (AI)"
 AI_READING_HOW = (
@@ -233,13 +276,24 @@ class QualityService:
 
     # ---- blind predictions: BlindInput in, prediction out -------------------
 
-    def predict_size_and_unit(self, blind: BlindInput) -> tuple[Decimal, str, bool] | None:
-        """(size, unit, converted) from the legacy size/unit only."""
+    def predict_size_and_unit(
+        self, blind: BlindInput, view: CategoryView | None = None,
+    ) -> tuple[Decimal, str, bool] | None:
+        """(size, unit, converted) from the legacy size/unit, read as production reads it.
+
+        ``view`` is what the *other* validated rows say about this product's category; it
+        decides whether an ``OZ`` is a fluid ounce. Returns ``ASK_A_PERSON`` as the unit
+        when production would send the row to review instead of answering."""
         if blind.legacy_size is None or not blind.legacy_uom:
             return None
         proposal = self.rule_engine.propose(blind.legacy_size, blind.legacy_uom)
         if proposal is None:
             return None
+        reading = guards.ounce_reading(blind.legacy_uom, view) if view else "WEIGHT"
+        if reading == "REVIEW":
+            return proposal.standard_size, ASK_A_PERSON, True
+        if reading == "VOLUME":
+            proposal = self.rule_engine.propose(blind.legacy_size, guards.FLUID_OUNCE_UOM) or proposal
         identity = proposal.source_uom == proposal.target_uom and proposal.factor == Decimal("1")
         size = proposal.raw_target if identity else proposal.standard_size
         return size, proposal.standard_uom, not identity
@@ -280,6 +334,7 @@ class QualityService:
             "We hid the pack size your team entered, let the agent read the pack from the "
             "description text, and compared the two.",
         )
+        profile = CategoryProfile.from_items(items)
         counters: Counter[str] = Counter()
         first_item: dict[str, dict[str, Any]] = {}
         ai_reading_eligible = 0
@@ -306,17 +361,56 @@ class QualityService:
             answer_size, answer_uom, answer_pack = answer_key(item)
             blind = BlindInput.from_item(item)
 
-            predicted = self.predict_size_and_unit(blind)
+            # The row under test is left out of its own category profile.
+            view = profile.view(levels_of(item), leave_out=answer_uom)
+            predicted = self.predict_size_and_unit(blind, view)
             if predicted is not None and answer_size is not None:
                 size, uom, converted = predicted
                 source = f"{_plain(blind.legacy_size)} {blind.legacy_uom}"
-                agrees, kind, note = compare_size(
-                    size, uom, converted, answer_size, answer_uom,
-                    given=source, unit_source=f"The legacy unit {blind.legacy_uom}",
-                )
+                agent_answer = verdict = None
+                if uom == ASK_A_PERSON:
+                    agrees, kind, agent_answer = False, "SENT_TO_REVIEW", "A person decides"
+                    note = (
+                        f"{source} could be a weight or fluid ounces in this category, so the "
+                        "agent asks a person instead of answering."
+                    )
+                    # Asking was right only if the plain weight conversion would have been wrong.
+                    as_weight = answer_uom == "GM" and within_conversion_tolerance(size, answer_size)
+                    verdict = "AGENT_MISS" if as_weight else "CORRECT_CATCH"
+                else:
+                    agrees, kind, note = compare_size(
+                        size, uom, converted, answer_size, answer_uom,
+                        given=source, unit_source=f"The legacy unit {blind.legacy_uom}",
+                    )
+                    if (
+                        not agrees and kind == "SIZE" and answer_pack and answer_pack > 1
+                        and within_conversion_tolerance(size, answer_size * answer_pack)
+                    ):
+                        # D1: unit size is one piece. Here the legacy value is the whole pack.
+                        kind = "PACK_TOTAL"
+                        note = (
+                            f"{source} is the whole pack. Your team entered {_plain(answer_size)} "
+                            f"{answer_uom} × {_plain(answer_pack)}, which is the same total."
+                        )
+                    elif not agrees:
+                        # The description is an independent witness between legacy and Excel.
+                        backs_agent = text_states(item, size, uom, answer_pack)
+                        backs_excel = text_states(item, answer_size, answer_uom, answer_pack)
+                        if backs_agent and not backs_excel:
+                            verdict = "DATA_PROBLEM"
+                            note += " The product's own description agrees with the agent."
+                        elif backs_excel and not backs_agent:
+                            # Production compares every conversion with the description and
+                            # stops when they disagree, so this value would not be written.
+                            verdict, kind, agent_answer = "CORRECT_CATCH", "SENT_TO_REVIEW", "A person decides"
+                            note = (
+                                f"{source} does not fit the product's description, so the agent "
+                                "asks a person instead of writing it."
+                            )
                 unit.record(
                     item, agrees, kind, source,
-                    f"{_plain(size)} {uom}", f"{_plain(answer_size)} {answer_uom}", note,
+                    agent_answer or f"{_plain(size)} {uom}",
+                    f"{_plain(answer_size)} {answer_uom}", note, verdict,
                 )
 
             predicted_pack = self.predict_pack_size(blind)
@@ -368,23 +462,37 @@ class QualityService:
             )).as_dict(resolutions) | {"available_to_test": ai_reading_eligible, "run": None}
         capabilities = [unit.as_dict(resolutions), pack.as_dict(resolutions), ai_row]
         measured = [row for row in capabilities if row["tested"]]
-        checks = sum(row["tested"] for row in measured)
+        totals: Counter[str] = Counter()
+        for row in measured:
+            for part in row["breakdown"]:
+                totals[part["verdict"]] += part["products"]
         correct = sum(row["correct"] for row in measured)
-        awaiting = sum(row["awaiting_decision"] for row in measured)
+        scored = sum(row["scored"] for row in measured)
+        checks = sum(row["tested"] for row in measured)
+        matched = sum(row["agreed"] for row in measured)
         accuracy = {
-            # One figure for the whole agent: every blind check, across every capability.
+            # One figure for the whole agent: every check, across every capability.
             "checks": checks,
+            "scored": scored,
             "correct": correct,
-            "percent": round(correct * 100 / checks, 1) if checks else None,
-            "awaiting_decision": awaiting,
-            "no_answer": sum(row["no_answer"] for row in measured),
-            "confirmed_incorrect": sum(row["confirmed_incorrect"] for row in measured),
-            # Where accuracy lands if every open decision goes the agent's way.
-            "potential_percent": round((correct + awaiting) * 100 / checks, 1) if checks else None,
+            "percent": round(correct * 100 / scored, 1) if scored else None,
+            "misses": totals["AGENT_MISS"],
+            "data_problems": totals["DATA_PROBLEM"],
+            "awaiting_decision": totals["NEEDS_DECISION"],
+            "bad_values_stopped": totals["CORRECT_CATCH"],
+            # Supporting figure only: Excel itself contains mistakes, so this understates the agent.
+            "match_percent": round(matched * 100 / checks, 1) if checks else None,
+            "breakdown": [
+                {"verdict": name, "what_happened": label, "counts_as": counts_as, "products": totals[name]}
+                for name, label, counts_as in VERDICTS if totals[name]
+            ],
             "capabilities_measured": len(measured),
             "capabilities_total": len(capabilities),
         }
         return {
+            "engine": self._engine(job, profile, ai_run),
+            "safety_checks": self._safety_checks(items),
+            "ai_history": list(job.get("ai_reading_history") or []),
             "result_accuracy": self._result_accuracy(items),
             "version": QUALITY_REPORT_VERSION,
             "decisions_version": decisions_version,
@@ -405,6 +513,38 @@ class QualityService:
                 for decision in decisions
             ],
         }
+
+    @staticmethod
+    def _engine(job: dict[str, Any], profile: CategoryProfile, ai_run: dict[str, Any]) -> dict[str, Any]:
+        """Which version of the agent produced these figures."""
+        policy = job.get("validation_policy") or {}
+        return {
+            "agent_version": AGENT_VERSION,
+            "prompt_version": PROMPT_VERSION,
+            "ruleset_version": job.get("ruleset_version"),
+            "guards_version": policy.get("guards_version"),
+            "processed_with_guards": bool(policy.get("guards_version")),
+            "ai_test_prompt_version": ai_run.get("prompt_version"),
+            "ai_test_is_current": ai_run.get("prompt_version") in {None, PROMPT_VERSION},
+            "liquid_categories": profile.as_dict()["liquid_categories"],
+            "mixed_categories": profile.as_dict()["mixed_categories"],
+        }
+
+    @staticmethod
+    def _safety_checks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """What the guards did in this workbook, in plain language."""
+        found: dict[str, dict[str, Any]] = {}
+        for item in items:
+            for guard in item.get("guards") or []:
+                meta = SAFETY_CHECKS.get(guard.get("code"))
+                if not meta:
+                    continue
+                row = found.setdefault(guard["code"], {
+                    "key": guard["code"], "check": meta[0], "effect": meta[1], "products": 0,
+                    "example": f"{item.get('item_no')} ({_label(item)}): {guard.get('message')}",
+                })
+                row["products"] += 1
+        return [found[code] for code in SAFETY_CHECKS if code in found]
 
     @staticmethod
     def _result_accuracy(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -443,7 +583,7 @@ class QualityService:
                     blind = BlindInput.from_item(item)
                     signals = [
                         extract_field_signals(field, getattr(blind, attribute))
-                        for field, attribute in _DESCRIPTION_FIELDS
+                        for field, attribute in DESCRIPTION_FIELDS
                     ]
                 outcome, fragments = text_check(signals, size, uom, pack)
                 if outcome == "NO_TEXT":
@@ -571,7 +711,8 @@ class QualityService:
                 buckets["SKIPPED"] += 1
                 continue
             review = (item.get("review") or {}).get("overall_status")
-            policy = item.get("application_policy") or "NO_CHANGE"
+            # The same rule the ledger and the workbook use, so the three never disagree.
+            policy = effective_status(item)
             if policy == "REVIEW_REQUIRED" and review in {"APPROVED", "REJECTED", "OVERRIDDEN"}:
                 buckets["REVIEWED"] += 1
             elif policy in {"NO_CHANGE", "OBSERVATION_ONLY"}:
@@ -633,6 +774,28 @@ class QualityService:
         return f"{item_no}: {label}"
 
 
+# Every tested product gets exactly one verdict, so the figures always add up.
+#   CORRECT          same answer as the team
+#   CORRECT_CATCH    the agent stopped and asked a person, and its reading really did
+#                    conflict with Excel: a bad value was kept out of the workbook
+#   RULE_APPLIED     the agent followed the agreed definition (D1) and Excel records the
+#                    same product differently (a bundle as 1 EA x 2, a case as its total)
+#   DATA_PROBLEM     the product's own text states the agent's value and not Excel's.
+#                    Left out of the score entirely: nobody has checked the pack.
+#   NEEDS_DECISION   the two differ and nothing in the data says which is right.
+#                    Left out of the score until the business decides.
+#   AGENT_MISS       the agent was wrong, or asked a person when it did not need to
+VERDICTS: tuple[tuple[str, str, str], ...] = (
+    ("CORRECT", "Same answer as your team", "Correct"),
+    ("CORRECT_CATCH", "Stopped a questionable value and asked a person", "Correct"),
+    ("RULE_APPLIED", "Followed the agreed rule; Excel records it differently", "Correct"),
+    ("AGENT_MISS", "Agent was wrong, or asked a person when it did not need to", "Miss"),
+    ("DATA_PROBLEM", "The product's own description disagrees with Excel", "Not scored — problem found in your data"),
+    ("NEEDS_DECISION", "Differs, and only your team can say which is right", "Not scored — awaiting your decision"),
+)
+_COUNTS_AS_CORRECT = frozenset({"CORRECT", "CORRECT_CATCH", "RULE_APPLIED"})
+
+
 class CapabilityScore:
     def __init__(self, key: str, capability: str, how_tested: str):
         self.key = key
@@ -641,36 +804,44 @@ class CapabilityScore:
         self.tested = 0
         self.agreed = 0
         self.no_answer = 0
-        self.disagreements: Counter[str] = Counter()
+        self.verdicts: Counter[str] = Counter()
+        self.disagreements: Counter[str] = Counter()  # NEEDS_DECISION only, by kind
         self.examples: list[dict[str, Any]] = []
 
     def record(
         self, item: dict[str, Any], agrees: bool, kind: str,
-        source: str, agent: str, excel: str, note: str,
+        source: str, agent: str, excel: str, note: str, verdict: str | None = None,
     ) -> None:
+        if verdict is None:
+            verdict = "CORRECT" if agrees else (
+                "AGENT_MISS" if kind in {"NO_ANSWER", "SENT_TO_REVIEW"} else "NEEDS_DECISION"
+            )
         self.tested += 1
+        self.verdicts[verdict] += 1
         if agrees:
             self.agreed += 1
-        elif kind == "NO_ANSWER":
+        elif kind in {"NO_ANSWER", "SENT_TO_REVIEW"}:
+            # The agent did not commit to a value.
             self.no_answer += 1
-        else:
+        if verdict == "NEEDS_DECISION":
             self.disagreements[kind] += 1
-        # Keep every kind of difference visible, plus a few matches for context.
+        # Keep every kind of outcome visible, plus a few plain matches for context.
         kept = sum(
             1 for example in self.examples
-            if example["agrees"] == agrees and example["kind"] == kind
+            if example["verdict"] == verdict and example["kind"] == kind
         )
-        if kept < (5 if agrees else MAX_EXAMPLES):
+        if kept < (5 if verdict == "CORRECT" else MAX_EXAMPLES):
             self.examples.append({
                 "item_no": item.get("item_no"), "row_number": item.get("row_number"),
                 "product": _label(item), "source": source, "agent": agent, "excel": excel,
-                "agrees": agrees, "kind": kind, "note": note,
+                "agrees": agrees, "kind": kind, "verdict": verdict, "note": note,
             })
 
     def state(self) -> dict[str, Any]:
         return {
             "key": self.key, "capability": self.capability, "how_tested": self.how_tested,
             "tested": self.tested, "agreed": self.agreed, "no_answer": self.no_answer,
+            "verdicts": dict(self.verdicts),
             "disagreements": dict(self.disagreements), "examples": self.examples,
         }
 
@@ -680,19 +851,33 @@ class CapabilityScore:
         score.tested, score.agreed = state["tested"], state["agreed"]
         score.no_answer = state.get("no_answer", 0)
         score.disagreements = Counter(state.get("disagreements") or {})
-        score.examples = list(state.get("examples") or [])
+        # A score stored before verdicts existed: matches are correct, the rest undecided.
+        score.verdicts = Counter(state.get("verdicts") or {
+            "CORRECT": score.agreed, "AGENT_MISS": score.no_answer,
+            "NEEDS_DECISION": sum(score.disagreements.values()),
+        })
+        score.examples = [
+            {"verdict": "CORRECT" if example.get("agrees") else "NEEDS_DECISION", **example}
+            for example in state.get("examples") or []
+        ]
         return score
 
     def as_dict(self, resolutions: dict[str, str]) -> dict[str, Any]:
-        confirmed_correct = confirmed_incorrect = awaiting = 0
+        verdicts = Counter(self.verdicts)
+        decided_for = decided_against = 0
         for kind, count in self.disagreements.items():
             resolution = resolutions.get(f"benchmark:{self.key}:{kind}")
             if resolution == "AGENT_CORRECT":
-                confirmed_correct += count
+                decided_for += count
             elif resolution == "EXCEL_CORRECT":
-                confirmed_incorrect += count
-            else:
-                awaiting += count
+                decided_against += count
+        # A recorded business decision moves those products out of "awaiting".
+        verdicts["NEEDS_DECISION"] -= decided_for + decided_against
+        verdicts["CORRECT"] += decided_for
+        verdicts["AGENT_MISS"] += decided_against
+        correct = sum(verdicts[name] for name in _COUNTS_AS_CORRECT)
+        scored = correct + verdicts["AGENT_MISS"]
+        awaiting = verdicts["NEEDS_DECISION"]
         return {
             "key": self.key,
             "capability": self.capability,
@@ -702,17 +887,25 @@ class CapabilityScore:
             ),
             "tested": self.tested,
             "agreed": self.agreed,
-            # Correct = same answer as the team, plus differences later decided in
-            # the agent's favour. Open differences are never counted as correct.
-            "correct": self.agreed + confirmed_correct,
-            "accuracy_percent": (
-                round((self.agreed + confirmed_correct) * 100 / self.tested, 1)
-                if self.tested else None
-            ),
+            "match_percent": round(self.agreed * 100 / self.tested, 1) if self.tested else None,
+            # Agent accuracy: right answer or right action, over everything that can be
+            # judged. Data problems and open decisions are in neither side of the fraction.
+            "scored": scored,
+            "correct": correct,
+            "misses": verdicts["AGENT_MISS"],
+            "accuracy_percent": round(correct * 100 / scored, 1) if scored else None,
+            "data_problems": verdicts["DATA_PROBLEM"],
             "awaiting_decision": awaiting,
             "no_answer": self.no_answer,
-            "confirmed_correct": confirmed_correct,
-            "confirmed_incorrect": confirmed_incorrect,
+            "confirmed_correct": decided_for,
+            "confirmed_incorrect": decided_against,
+            "breakdown": [
+                {"verdict": name, "what_happened": label, "counts_as": counts_as, "products": verdicts[name]}
+                for name, label, counts_as in VERDICTS if verdicts[name]
+            ],
             "available_to_test": None,
-            "examples": sorted(self.examples, key=lambda example: example["agrees"]),
+            "examples": sorted(
+                self.examples,
+                key=lambda example: [name for name, *_ in VERDICTS].index(example["verdict"]) if example["verdict"] != "CORRECT" else 99,
+            ),
         }

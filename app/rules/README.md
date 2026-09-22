@@ -13,8 +13,13 @@ To change a rule:
 
 Rules are validated at startup. Duplicate identifiers, duplicate enabled source units,
 invalid target units, non-positive factors, and unsupported operations stop startup.
-`FZ`, `ST`, `SET`, `PR`, and `AV KG` remain intentionally absent until their business
-rules are confirmed.
+`ST`, `SET`, `PR`, and `AV KG` remain intentionally absent until their business rules are
+confirmed. `FZ` was approved on 21 Sep 2026 as the US fluid ounce (`FLOZ_TO_ML`, 29.5735 ML):
+13 validated rows match that factor exactly and none match the imperial one. A legacy `OZ`
+is read as a fluid ounce only when the product's category is sold by volume in the
+workbook's own validated rows; that choice belongs to the fluid-ounce guard, not the ruleset.
+Local-language unit spellings (`克`, `公斤`, `毫升`, `公升`, `安士`, `磅`) are aliases of the
+existing rules, because the AI reports units exactly as written.
 
 ## Rounding and Group A validation
 

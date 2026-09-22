@@ -155,6 +155,7 @@ class MongoRepositories:
             "row_number": 1,
             "item_no": 1,
             "group": 1,
+            "original": 1,
             "field_proposals": 1,
             "review.overall_status": 1,
             "review.override_values": 1,
@@ -174,7 +175,7 @@ class MongoRepositories:
             "context": 1, "findings.code": 1, "findings.human_reason": 1,
             "reason_code": 1, "pack_result.status": 1, "application_policy": 1,
             "review.overall_status": 1, "field_proposals": 1, "rule.rule_id": 1,
-            "verification": 1,
+            "verification": 1, "guards": 1, "department": 1,
         }
         return list(self.db.job_items.find({"job_id": job_id}, projection).sort("row_number", ASCENDING))
 
@@ -186,6 +187,14 @@ class MongoRepositories:
         self.db.ai_reading_results.delete_many({"job_id": job_id})
         if results:
             self.db.ai_reading_results.insert_many([dict(result) for result in results])
+
+    def save_agent_evaluation(self, document: dict[str, Any]) -> None:
+        self.db.agent_evaluations.insert_one({**document, "created_at": now()})
+
+    def agent_evaluations(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Newest first, so versions of the agent can be compared."""
+        cursor = self.db.agent_evaluations.find({}, {"_id": 0}).sort("created_at", -1).limit(limit)
+        return list(cursor)
 
     def close(self) -> None:
         self.client.close()

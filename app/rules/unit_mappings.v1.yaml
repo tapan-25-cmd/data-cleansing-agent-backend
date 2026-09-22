@@ -1,4 +1,4 @@
-version: poc-v2
+version: poc-v3
 rules:
   - rule_id: GM_IDENTITY
     source_uoms: [GM]
@@ -63,6 +63,17 @@ rules:
     factor: "1000"
     enabled: true
     notes: Litre aliases to millilitres.
+  - rule_id: FLOZ_TO_ML
+    source_uoms: [FL OZ, FLOZ, FZ]
+    target_uom: ML
+    operation: MULTIPLY
+    factor: "29.5735295625"
+    enabled: true
+    notes: >-
+      US fluid ounce (decision D2, 21 Sep 2026; closes O-2). 13 validated rows match this
+      factor exactly and none match the imperial one. A legacy OZ is read as a fluid ounce
+      only when the product's category is sold by volume; that choice is made by the
+      fluid-ounce guard, not by this rule.
   - rule_id: PIECE_TO_EA
     source_uoms: [PC]
     target_uom: EA

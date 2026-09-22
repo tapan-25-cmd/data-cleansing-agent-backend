@@ -139,8 +139,11 @@ def test_ai_observation_is_converted_only_by_deterministic_rule_engine(tmp_path:
 
     item = next(item for item in repository.items if item["item_no"] == "000004")
     assert item["ai_observation"] == {
-        "value": "1", "uom": "KG", "field": "item_desc_eng", "fragment": "1 KG"
+        "value": "1", "uom": "KG", "field": "item_desc_eng", "fragment": "1 KG", "role": None,
     }
+    assert item["ai_raw"]["status"] == "PROPOSAL"
+    assert item["confidence"] == "MEDIUM"  # derived: one clean source, not the model's "HIGH"
+    assert repository.job["ai_usage"]["calls"] == 1
     assert item["field_proposals"]["standard_size"] == "1000"
     assert item["field_proposals"]["standard_uom"] == "GM"
     assert item["rule"]["rule_id"] == "KG_TO_GM"
@@ -429,3 +432,107 @@ def test_count_conflict_requires_review_without_changing_the_group(tmp_path: Pat
     # A conflict never proposes or applies a value.
     assert all(change["proposed"] is None for change in item["changes"])
     assert repository.job["stats"]["discrepancy_bilingual_count_conflicts"] == 1
+
+
+def run_rows(tmp_path, rows, provider=None, departments=("03_Grocery 2", "06_Dairy & Frozen")):
+    storage = LocalFileStorage(tmp_path / "files", 10_000_000)
+    fixture = tmp_path / "fixture.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = INPUT_SHEET
+    headers = sorted(set(FIELD_MAP.values()) | PURGE_HEADERS)
+    sheet.append(headers)
+    for values in rows:
+        sheet.append([values.get(header) for header in headers])
+    workbook.save(fixture)
+    with fixture.open("rb") as source:
+        storage.save_input("abc123", source)
+    repository = FakeRepositories({
+        "job_id": "abc123", "selected_departments": list(departments), "snapshot_label": None,
+    })
+    JobProcessor(repository, storage, load_default_registry(), provider or MockInferenceProvider()).process("abc123")
+    return repository
+
+
+def validated(number, category, size, uom):
+    return {"Item_no": f"9{number:05d}", "Department": "06_Dairy & Frozen", "Category": category,
+            "item_desc_eng": "FILLER", "Standardize Unit Size": size, "Standardize UOM": uom,
+            "Standardize Pack Size": 1}
+
+
+def test_ounce_is_a_fluid_ounce_in_a_liquid_category_and_a_question_in_a_mixed_one(tmp_path: Path):
+    rows = [validated(n, "Fresh Milk", 1000, "ML") for n in range(20)]
+    rows += [validated(100 + n, "Sauces", 300, "ML" if n % 2 else "GM") for n in range(20)]
+    rows += [validated(200 + n, "Flour", 1000, "GM") for n in range(20)]
+    for number, category in (("000001", "Fresh Milk"), ("000002", "Sauces"), ("000003", "Flour")):
+        rows.append({"Item_no": number, "Department": "06_Dairy & Frozen", "Category": category,
+                     "item_desc_eng": "PRODUCT", "item_size_value": 48, "item_size_unit": "OZ",
+                     "Standardize Unit Size": 48, "Standardize UOM": "OZ", "Standardize Pack Size": 1})
+    items = {item["item_no"]: item for item in run_rows(tmp_path, rows).items}
+
+    milk, sauce, flour = items["000001"], items["000002"], items["000003"]
+    assert (milk["field_proposals"]["standard_size"], milk["field_proposals"]["standard_uom"]) == ("1420", "ML")
+    assert milk["rule"]["rule_id"] == "FLOZ_TO_ML" and milk["application_policy"] == "AUTO_APPLY"
+    assert [f["code"] for f in milk["findings"]] == ["OUNCE_READ_AS_FLUID"]
+
+    # Mixed category: keep the weight as the suggestion, but a person chooses.
+    assert (sauce["field_proposals"]["standard_size"], sauce["field_proposals"]["standard_uom"]) == ("1361", "GM")
+    assert sauce["application_policy"] == "REVIEW_REQUIRED"
+    assert "1361 GM" in sauce["findings"][0]["human_reason"] and "1420 ML" in sauce["findings"][0]["human_reason"]
+
+    assert (flour["field_proposals"]["standard_uom"], flour["application_policy"], flour["findings"]) == ("GM", "AUTO_APPLY", [])
+
+
+class RoleProvider:
+    """Answers like agent contract v3: every reading carries a role."""
+
+    def __init__(self, role, pack_role=None):
+        self.role, self.pack_role, self.requests = role, pack_role, []
+
+    async def infer(self, request):
+        self.requests.append(request)
+        result = InferenceResult(
+            status="PROPOSAL", rationale="test",
+            measurement=ObservedMeasurement(value="1", uom="L", field="item_desc_eng", fragment="1L", role=self.role),
+            pack_size="8" if self.pack_role else None,
+            pack_evidence=Evidence(field="item_desc_eng", fragment="8 PACK") if self.pack_role else None,
+            pack_role=self.pack_role,
+        )
+        return InferenceResponse(result=result, metadata=ProviderMetadata(
+            provider="google-adk", agent_name="a", agent_version="2.0.0", input_tokens=900, output_tokens=60,
+        ))
+
+
+def blank_row(description, category="Baking Aids"):
+    return [{"Item_no": "000777", "Department": "03_Grocery 2", "Category": category, "item_desc_eng": description}]
+
+
+def test_a_capacity_reading_never_becomes_a_size_whatever_the_model_recommends(tmp_path: Path):
+    provider = RoleProvider("CAPACITY_OR_RANGE")
+    repository = run_rows(tmp_path, blank_row("1L MICROWAVE BOX (8 PACK)"), provider)
+    item = repository.items[0]
+
+    assert item["field_proposals"] == {"standard_size": None, "standard_uom": None, "standard_pack_size": None}
+    assert item["reason_code"] == "AI_MEASUREMENT_NOT_PRODUCT_SIZE"
+    assert item["application_policy"] == "UNRESOLVED"
+    reason = next(f["human_reason"] for f in item["findings"] if f["code"] == "AI_MEASUREMENT_NOT_PRODUCT_SIZE")
+    assert "“1L”" in reason and "capacity" in reason
+    # D3: the agent is given the category as context, and nothing it must not see.
+    sent = provider.requests[0].model_dump(exclude_none=True)
+    assert sent["category"] == "Baking Aids"
+    assert not {"standard_size", "legacy_size", "product_description"} & set(sent)
+    assert repository.job["ai_usage"] == {"calls": 1, "input_tokens": 900, "output_tokens": 60}
+
+
+def test_a_contents_count_is_not_written_as_the_pack_size(tmp_path: Path):
+    contents = run_rows(tmp_path / "a", blank_row("JUICE 1L (8 PACK)"), RoleProvider("NET_CONTENT_TOTAL", "CONTENTS")).items[0]
+    sellable = run_rows(tmp_path / "b", blank_row("JUICE 1L (8 PACK)"), RoleProvider("NET_CONTENT_UNIT", "SELLABLE_PACK")).items[0]
+
+    assert contents["field_proposals"]["standard_size"] == "1000"
+    assert contents["field_proposals"]["standard_pack_size"] is None
+    assert sellable["field_proposals"]["standard_pack_size"] == "8"
+    # An AI-read pack size is a suggestion for a person, never an automatic write.
+    assert sellable["application_policy"] == "REVIEW_REQUIRED"
+    assert "AI_PACK_NEEDS_CONFIRMATION" in [f["code"] for f in sellable["findings"]]
+    pack = next(c for c in sellable["changes"] if c["field"] == "standard_pack_size")
+    assert (pack["proposed"], pack["final"]) == ("8", None)

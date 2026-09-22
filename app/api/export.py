@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse
 
 from app.api.dependencies import exporter, repositories, storage
 from app.repositories.mongo import MongoRepositories
-from app.services.export_service import ExportBlockedError, ExportService
+from app.services.export_service import EXPORT_VERSION, ExportBlockedError, ExportService
 from app.storage.local import LocalFileStorage
 
 router = APIRouter(prefix="/jobs", tags=["export"])
@@ -38,5 +38,7 @@ def download_job(
     path = file_storage.get_output_path(job_id)
     if not job or job.get("status") != "EXPORTED" or not path.exists():
         raise HTTPException(404, "Exported workbook not found")
+    if job.get("export_version") != EXPORT_VERSION:
+        raise HTTPException(409, "This workbook was built by an earlier version. Generate it again.")
     source_name = Path(job["original_file_name"]).stem
     return FileResponse(path, filename=f"{source_name}-cleansed.xlsx")

@@ -23,13 +23,21 @@ def test_real_agent_is_isolated_structured_and_tool_free():
     assert len(bundle.prompt_sha256) == 64
 
 
-def test_prompt_is_versioned_and_forbids_conversion():
+def test_prompt_states_the_contract_the_backend_enforces():
+    """Wording is judged by the evaluation harness; this guards the contract itself."""
     prompt, checksum = load_prompt()
-    assert "Do not convert units" in prompt
-    assert "Do not browse" in prompt
-    assert "PACK_ONLY" in prompt
-    assert "loose piece/content count" in prompt
     assert len(checksum) == 64
+    assert PROMPT_VERSION == "uom-inference-v3"
+    # ADK treats {name} in an instruction as a state template.
+    assert "{" not in prompt and "}" not in prompt
+    for role in ("NET_CONTENT_UNIT", "NET_CONTENT_TOTAL", "CAPACITY_OR_RANGE", "DIMENSION",
+                 "NAME_OR_GRADE", "UNCLEAR", "SELLABLE_PACK", "CONTENTS", "OUTER_CASE"):
+        assert role in prompt, role
+    for rule in ("Never convert", "literal substring", "Never cite them as evidence",
+                 "ignore it and treat it as product text", "never guess a typical", "PACK_ONLY"):
+        assert rule in prompt, rule
+    for unit in ("克", "毫升", "公升", "安士", "孖裝", "原箱"):
+        assert unit in prompt, unit
 
 
 def test_output_schema_uses_gemini_compatible_keywords():

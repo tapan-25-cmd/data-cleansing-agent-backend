@@ -21,11 +21,10 @@ def product(**changes) -> InputProduct:
     [
         ("JUICE 6 X 500ML", "6", "COUNT_X_MEASUREMENT"),
         ("JUICE 500ML x 6", "6", "MEASUREMENT_X_COUNT"),
-        ("PACK OF 10 BOTTLES", "10", "PACK_OF_COUNT"),
         ("12x330 ml CANS", "12", "COUNT_X_MEASUREMENT"),
         ("24 CANS 330ML", "24", "COUNT_CONTAINER_MEASUREMENT"),
         ("4 PK x 250 GM", "4", "COUNT_PACK"),
-        ("6 PACK", "6", "COUNT_PACK"),
+        ("BAKED BEANS 3PK (190GMX3)", "3", "MEASUREMENT_X_COUNT"),
     ],
 )
 def test_explicit_pack_patterns_are_deterministic(description, expected, pattern):
@@ -112,3 +111,16 @@ def test_pack_agent_request_carries_context_but_not_brand_fields():
     assert request.known_measurement.value == Decimal("500")
     assert request.known_measurement.uom == "ML"
     assert request.item_brand_eng is None
+
+
+@pytest.mark.parametrize("description", [
+    "TORTILLA ORIGINAL MEDIUM (8 PACK)", "16PK MINI CHEESE & ONION ROLLS",
+    "JAPANESE MICROWAVE RICE 4PACKS", "PACK OF 10 BOTTLES", "6 PACK",
+])
+def test_a_pack_word_without_a_per_piece_size_is_contents_not_a_pack(description):
+    # D1: the stated weight is the whole product, so the count is what is inside it.
+    result = PackSizeService().assess(product(item_desc_eng=description))
+    assert result.status == PackStatus.NEEDS_AGENT
+    assert result.reason_code == "PACK_WORD_WITHOUT_PIECE_SIZE"
+    assert result.pack_size is None
+    assert len(result.candidates) == 1  # kept as evidence for the reviewer and the AI

@@ -117,3 +117,110 @@ async def test_adk_provider_accepts_valid_pack_only_result():
 
     assert response.result.status == "PACK_PROPOSAL"
     assert response.result.pack_size == 4
+
+
+def adk_provider(runner):
+    bundle = build_uom_agent(Settings(
+        _env_file=None, ai_provider="adk", gemini_api_key="test-api-key", gemini_model="gemini-3.6-flash",
+    ))
+    provider = AdkInferenceProvider(bundle)
+    provider.session_service = FakeSessionService()
+    provider.runner = runner
+    return provider
+
+
+class RateLimited(Exception):
+    code = 429
+
+
+class V3Event(FinalEvent):
+    def __init__(self, payload, prompt_tokens, answer_tokens):
+        super().__init__(payload)
+        self.usage_metadata = types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=prompt_tokens, candidates_token_count=answer_tokens,
+        )
+
+
+class FlakyV3Runner:
+    """Rate-limited twice, then a contract-v3 answer with roles and no reason code."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def run_async(self, **values):
+        self.calls += 1
+        if self.calls <= 2:
+            raise RateLimited("429 RESOURCE_EXHAUSTED")
+        yield V3Event({
+            "status": "NOT_IN_DESCRIPTION",
+            "other_measurements": [{
+                "value": "1", "uom": "L", "field": "item_desc_eng", "fragment": "1L",
+                "role": "CAPACITY_OR_RANGE",
+            }],
+            "rationale": "1L is the capacity of the box.",
+        }, 1200, 45)
+
+
+@pytest.mark.asyncio
+async def test_rate_limits_are_retried_with_backoff_and_tokens_are_recorded(monkeypatch):
+    from app.agents import adk_provider as module
+    delays = []
+
+    async def no_sleep(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr(module.asyncio, "sleep", no_sleep)
+    runner = FlakyV3Runner()
+    provider = adk_provider(runner)
+
+    response = await provider.infer(InferenceRequest(item_desc_eng="1L MICROWAVE BOX", category="Baking Aids"))
+
+    assert runner.calls == 3 and len(delays) == 2
+    assert 0.75 <= delays[0] <= 1.5 and 1.5 <= delays[1] <= 3.0  # jittered, growing
+    assert response.result.status == "NOT_IN_DESCRIPTION"
+    assert response.result.reason_code == "NOT_IN_DESCRIPTION"  # derived, not supplied
+    assert response.result.other_measurements[0].role == "CAPACITY_OR_RANGE"
+    assert (response.metadata.input_tokens, response.metadata.output_tokens) == (1200, 45)
+    assert response.metadata.prompt_version == "uom-inference-v3"
+    # Sessions are cleaned up even for the failed attempts.
+    assert len(provider.session_service.created) == len(provider.session_service.deleted) == 3
+
+
+class BrokenRunner:
+    calls = 0
+
+    async def run_async(self, **values):
+        BrokenRunner.calls += 1
+        raise ValueError("schema bug")
+        yield  # pragma: no cover
+
+
+@pytest.mark.asyncio
+async def test_a_non_transient_failure_is_not_retried():
+    provider = adk_provider(BrokenRunner())
+    with pytest.raises(ValueError):
+        await provider.infer(InferenceRequest(item_desc_eng="FLOUR 1 KG"))
+    assert BrokenRunner.calls == 1
+
+
+def test_transient_errors_are_recognised_and_backoff_is_capped():
+    from app.agents.adk_provider import BACKOFF_CAP_SECONDS, backoff_seconds, is_transient
+    assert is_transient(RateLimited("x")) and is_transient(RuntimeError("503 UNAVAILABLE"))
+    assert not is_transient(ValueError("bad schema"))
+    assert all(backoff_seconds(retry) <= BACKOFF_CAP_SECONDS for retry in range(12))
+
+
+def test_evidence_may_never_be_cited_from_category_context():
+    from app.agents.provider import InferenceResult, validate_evidence
+    request = InferenceRequest(item_desc_eng="GREEN TEA", category="Tea 500G")
+    with pytest.raises(ValueError):
+        InferenceResult.model_validate({
+            "status": "PROPOSAL",
+            "measurement": {"value": "500", "uom": "G", "field": "category", "fragment": "500G"},
+        })
+    result = InferenceResult.model_validate({
+        "status": "PROPOSAL",
+        "measurement": {"value": "500", "uom": "G", "field": "item_desc_eng", "fragment": "500G"},
+    })
+    with pytest.raises(ValueError, match="absent"):
+        validate_evidence(request, result)

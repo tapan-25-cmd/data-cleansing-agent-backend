@@ -9,7 +9,11 @@ It does not normalize units, convert values, write to MongoDB, or make approval 
 
 - `uom_inference_agent.py` defines the real Google ADK `LlmAgent`, Gemini model adapter,
   structured schemas, generation controls, and application wrapper.
-- `prompts/uom_inference_v2.md` is the versioned, packaged system instruction.
+- `prompts/uom_inference_v3.md` is the versioned, packaged system instruction (v2 is kept for
+  history). The agent labels every measurement with a role; the backend, not the model,
+  refuses any role that is not a product size. `versions.py` holds the version constants.
+- A wording change is judged by `services/agent_evaluation_service.py` against
+  `evaluations/agent_eval_cases.v1.yaml`, not by reading the prompt.
 - `adk_provider.py` runs one isolated ADK session per item, validates the final response,
   checks literal evidence, records provenance, and enforces a timeout.
 - `provider.py` defines the provider-independent input/output contract.

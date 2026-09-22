@@ -18,6 +18,8 @@ from app.domain.enums import ProposalMethod, WorkGroup
 from app.domain.product import InputProduct
 from app.repositories.mongo import MongoRepositories
 from app.rules.registry import RuleRegistry
+from app.services import guards
+from app.services.category_profile import CategoryProfile, levels_of
 from app.services.classifier import classify
 from app.services.discrepancy_service import (
     DISCREPANCY_ENGINE_VERSION,
@@ -75,6 +77,13 @@ def _json_value(value: object) -> object:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     return str(value)
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    try:
+        return Decimal(str(value)) if value is not None else None
+    except (ArithmeticError, ValueError):
+        return None
 
 
 def _original(product: InputProduct) -> dict[str, object]:
@@ -217,6 +226,7 @@ class JobProcessor:
         progress.start("PROFILING")
 
         counts: Counter[str] = Counter()
+        self.ai_usage: Counter[str] = Counter()
         source_counts: Counter[str] = Counter()
         items: list[dict[str, Any]] = []
         group_c: list[tuple[int, InputProduct]] = []
@@ -236,26 +246,40 @@ class JobProcessor:
         item_number_counts = Counter(
             row.product.item_no for row in selected_rows if row.product.item_no
         )
-        progress.start("PROCESSING_RULES", len(selected_rows))
-        for row_index, workbook_row in enumerate(selected_rows, start=1):
-            progress.advance(row_index)
+        # Pass 1: validate every row. The validated rows then describe what is normal
+        # for each category in *this* workbook, which the guards need before any
+        # value is proposed.
+        assessed: list[tuple[WorkbookRow, bool, DiscrepancyReport | None, GroupAValidationResult | None]] = []
+        for workbook_row in selected_rows:
             product = workbook_row.product
             purged = is_purged(workbook_row.raw)
-            group = classify(product, purged=purged)
-            validation: GroupAValidationResult | None = None
-            discrepancies: DiscrepancyReport | None = None
+            row_discrepancies: DiscrepancyReport | None = None
+            row_validation: GroupAValidationResult | None = None
             if not purged:
-                # One multi-signal extraction per row feeds both Group A
-                # validation and the persisted discrepancy record.
-                discrepancies = analyze_discrepancies(product)
-                validation = self.group_a_validator.validate(
+                # One multi-signal extraction per row feeds Group A validation, the
+                # guards and the persisted discrepancy record.
+                row_discrepancies = analyze_discrepancies(product)
+                row_validation = self.group_a_validator.validate(
                     workbook_row,
                     duplicate_item_number=(
                         bool(product.item_no)
                         and item_number_counts[product.item_no] > 1
                     ),
-                    discrepancies=discrepancies,
+                    discrepancies=row_discrepancies,
                 )
+            assessed.append((workbook_row, purged, row_discrepancies, row_validation))
+        profile = CategoryProfile.from_validated(
+            (levels_of(row.product), result.standard_uom, result.standard_size)
+            for row, _, _, result in assessed
+            if result is not None and result.status == GroupAValidationStatus.VALID
+        )
+
+        progress.start("PROCESSING_RULES", len(selected_rows))
+        for row_index, (workbook_row, purged, discrepancies, validation) in enumerate(assessed, start=1):
+            progress.advance(row_index)
+            product = workbook_row.product
+            group = classify(product, purged=purged)
+            if not purged:
                 if validation is not None:
                     if validation.status == GroupAValidationStatus.VALID:
                         group = WorkGroup.A
@@ -330,7 +354,40 @@ class JobProcessor:
                     if source_uom:
                         source_counts[source_uom] += 1
                     proposal = self.group_b_rule_engine.propose(product.legacy_size, source_uom)
+                    view = profile.view(levels_of(product))
+                    reading = guards.ounce_reading(source_uom, view)
+                    if proposal and reading != "WEIGHT":
+                        as_volume = self.group_b_rule_engine.propose(
+                            product.legacy_size, guards.FLUID_OUNCE_UOM,
+                        )
+                        if as_volume and reading == "VOLUME":
+                            proposal = as_volume
+                            item["guards"].append(
+                                guards.fluid_ounce_note(product.legacy_size, view.name)
+                            )
+                        elif as_volume:
+                            item["guards"].append(guards.fluid_ounce_review(
+                                product.legacy_size, proposal.standard_size,
+                                as_volume.standard_size, view.name,
+                            ))
                     if proposal:
+                        item["guards"].extend(filter(None, (
+                            guards.text_contradiction(
+                                discrepancies.signals.values(), proposal.standard_size,
+                                proposal.standard_uom, _decimal_or_none(product.standard_pack_size),
+                            ) if discrepancies else None,
+                            guards.legacy_is_pack_total(
+                                discrepancies.signals.values(), proposal.standard_size,
+                                proposal.standard_uom, _decimal_or_none(product.standard_pack_size),
+                            ) if discrepancies else None,
+                            guards.implausible_size(
+                                profile, levels_of(product), proposal.standard_size,
+                                proposal.standard_uom, read_from_text=False,
+                            ),
+                            guards.count_in_weight_category(
+                                source_uom, proposal.standard_uom, view,
+                            ),
+                        )))
                         item["field_proposals"].update({
                             "standard_size": str(proposal.standard_size),
                             "standard_uom": proposal.standard_uom,
@@ -408,7 +465,7 @@ class JobProcessor:
                 items, group_b_pack_candidates, agent_call_finished,
             ))
         if group_c:
-            asyncio.run(self._infer_group_c(items, group_c, agent_call_finished))
+            asyncio.run(self._infer_group_c(items, group_c, agent_call_finished, profile))
 
         # Materialize a stable result contract only after deterministic and
         # agent phases have finished populating proposals and provenance.
@@ -491,10 +548,13 @@ class JobProcessor:
                 "group_b_rounding": "EXCEL_NEAREST_WHOLE",
                 "pack_extraction_version": PACK_EXTRACTION_VERSION,
                 "discrepancy_engine_version": DISCREPANCY_ENGINE_VERSION,
+                "guards_version": guards.GUARDS_VERSION,
+                "category_profile": profile.as_dict(),
                 "packaging_expression_version": PACKAGING_EXPRESSION_VERSION,
                 "pack_agent_fallback_enabled": self.pack_size_inference_enabled,
             },
             "rule_readiness": readiness,
+            "ai_usage": dict(self.ai_usage),
             "quality": self.quality_service.build_report(job, items),
             "progress": {
                 "stage": "READY_FOR_REVIEW", "processed": stats["live"],
@@ -537,12 +597,18 @@ class JobProcessor:
             "evidence": [],
             "confidence": None,
             "validation": validation.as_dict() if validation else None,
+            "guards": [],
             "discrepancy": (
                 discrepancies.as_dict() if discrepancies
                 else {"version": DISCREPANCY_ENGINE_VERSION, "flagged": False, "details": [], "signals": {}}
             ),
             "review": self._not_required_review(),
         }
+
+    def _record_usage(self, response: Any) -> None:
+        self.ai_usage["calls"] += 1
+        self.ai_usage["input_tokens"] += response.metadata.input_tokens or 0
+        self.ai_usage["output_tokens"] += response.metadata.output_tokens or 0
 
     @staticmethod
     def _not_required_review() -> dict[str, Any]:
@@ -622,8 +688,14 @@ class JobProcessor:
                     response = await self.inference_provider.infer(request)
                 result = response.result
                 validate_evidence(request, result)
+                self._record_usage(response)
                 item = items[index]
-                if result.status == "PACK_PROPOSAL" and result.pack_size is not None:
+                item["pack_ai_raw"] = result.model_dump(mode="json")
+                if (
+                    result.status == "PACK_PROPOSAL"
+                    and result.pack_size is not None
+                    and guards.is_sellable_pack(result)
+                ):
                     item["field_proposals"]["standard_pack_size"] = str(
                         result.pack_size.quantize(Decimal("1"))
                     )
@@ -643,9 +715,16 @@ class JobProcessor:
                         "provider": response.metadata.model_dump(mode="json"),
                     }
                     item["evidence"].append(result.pack_evidence.model_dump())
+                    item["guards"].append(guards.ai_pack_needs_confirmation(
+                        result.pack_size, result.pack_evidence.fragment,
+                    ))
                 else:
                     item["pack_result"]["status"] = "AGENT_DECLINED"
-                    item["pack_result"]["reason_code"] = result.reason_code
+                    item["pack_result"]["reason_code"] = (
+                        f"PACK_COUNT_IS_{result.pack_role}"
+                        if result.pack_size is not None and not guards.is_sellable_pack(result)
+                        else result.reason_code
+                    )
                 _log_event(
                     "item.pack_inference_completed",
                     job_id=item["job_id"],
@@ -683,7 +762,9 @@ class JobProcessor:
         items: list[dict[str, Any]],
         candidates: list[tuple[int, InputProduct]],
         on_done: Callable[[], None] = lambda: None,
+        profile: CategoryProfile | None = None,
     ) -> None:
+        profile = profile or CategoryProfile()
         semaphore = asyncio.Semaphore(self.ai_max_concurrency)
 
         async def infer(index: int, product: InputProduct) -> None:
@@ -695,6 +776,11 @@ class JobProcessor:
                 item_desc_local_lang=product.item_desc_local,
                 web_description_eng=product.web_description_eng,
                 web_description_chi=product.web_description_chi,
+                # D3: category context only; never citable as evidence.
+                division=product.division,
+                category=product.category,
+                subcategory=product.subcategory,
+                section=product.section,
             )
             try:
                 _log_event(
@@ -713,6 +799,9 @@ class JobProcessor:
                 item["reason_code"] = result.reason_code
                 item["confidence"] = result.confidence
                 item["ai_provenance"] = response.metadata.model_dump(mode="json")
+                # The complete answer is kept, including what the agent saw and set aside.
+                item["ai_raw"] = result.model_dump(mode="json")
+                self._record_usage(response)
                 observations = []
                 if result.measurement:
                     observations.append(result.measurement)
@@ -727,7 +816,13 @@ class JobProcessor:
                         result.measurement.value,
                         result.measurement.uom,
                     )
-                    if proposal is None:
+                    if not result.measurement.describes_product_size:
+                        # G1: a capacity, dimension, name or grade never becomes a size,
+                        # whatever the model recommended.
+                        proposal = None
+                        item["reason_code"] = "AI_MEASUREMENT_NOT_PRODUCT_SIZE"
+                        item["guards"].append(guards.not_a_product_size(result.measurement))
+                    elif proposal is None:
                         item["reason_code"] = (
                             "NO_RULE"
                             if self.registry.get(result.measurement.uom) is None
@@ -747,34 +842,48 @@ class JobProcessor:
                         }
                         item["field_provenance"]["standard_size"] = shared_provenance
                         item["field_provenance"]["standard_uom"] = shared_provenance
-                    pack_status = (item.get("pack_result") or {}).get("status")
-                    if (
-                        self.pack_size_inference_enabled
-                        and result.pack_size is not None
-                        and pack_status in {
-                            PackStatus.NEEDS_AGENT.value,
-                            PackStatus.NOT_FOUND.value,
-                        }
-                    ):
-                        item["field_proposals"]["standard_pack_size"] = str(
-                            result.pack_size.quantize(Decimal("1"))
+                        implausible = guards.implausible_size(
+                            profile, levels_of(product), proposal.standard_size,
+                            proposal.standard_uom, read_from_text=True,
                         )
-                        item["review"]["field_decisions"]["standard_pack_size"] = "PENDING"
-                        item["pack_result"] = {
-                            "version": PACK_EXTRACTION_VERSION,
-                            "status": "AGENT_PROPOSAL",
-                            "reason_code": "EXPLICIT_PACK_COUNT",
-                            "pack_size": str(result.pack_size.quantize(Decimal("1"))),
-                            "evidence": result.pack_evidence.model_dump(),
-                            "invalid_existing": item["pack_result"].get("invalid_existing", False),
-                        }
-                        item["field_provenance"]["standard_pack_size"] = {
-                            "method": ProposalMethod.AI_INFERENCE.value,
-                            "evidence": result.pack_evidence.model_dump(),
-                            "confidence": result.confidence,
-                            "provider": response.metadata.model_dump(mode="json"),
-                        }
-                        item["evidence"].append(result.pack_evidence.model_dump())
+                        if implausible:
+                            item["guards"].append(implausible)
+                        item["confidence"] = guards.derived_confidence(
+                            result.measurement, request, blocked=bool(implausible),
+                        )
+                # A pack count may be written even when no size is ("SMALL CAN BEER 4'S").
+                pack_status = (item.get("pack_result") or {}).get("status")
+                if (
+                    self.pack_size_inference_enabled
+                    and result.pack_size is not None
+                    and guards.is_sellable_pack(result)
+                    and pack_status in {
+                        PackStatus.NEEDS_AGENT.value,
+                        PackStatus.NOT_FOUND.value,
+                    }
+                ):
+                    item["field_proposals"]["standard_pack_size"] = str(
+                        result.pack_size.quantize(Decimal("1"))
+                    )
+                    item["review"]["field_decisions"]["standard_pack_size"] = "PENDING"
+                    item["pack_result"] = {
+                        "version": PACK_EXTRACTION_VERSION,
+                        "status": "AGENT_PROPOSAL",
+                        "reason_code": "EXPLICIT_PACK_COUNT",
+                        "pack_size": str(result.pack_size.quantize(Decimal("1"))),
+                        "evidence": result.pack_evidence.model_dump(),
+                        "invalid_existing": item["pack_result"].get("invalid_existing", False),
+                    }
+                    item["field_provenance"]["standard_pack_size"] = {
+                        "method": ProposalMethod.AI_INFERENCE.value,
+                        "evidence": result.pack_evidence.model_dump(),
+                        "confidence": result.confidence,
+                        "provider": response.metadata.model_dump(mode="json"),
+                    }
+                    item["evidence"].append(result.pack_evidence.model_dump())
+                    item["guards"].append(guards.ai_pack_needs_confirmation(
+                        result.pack_size, result.pack_evidence.fragment,
+                    ))
                 pack_status = (item.get("pack_result") or {}).get("status")
                 if (
                     self.pack_size_inference_enabled

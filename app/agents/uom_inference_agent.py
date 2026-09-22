@@ -9,13 +9,11 @@ from google.adk.models import Gemini
 from google.genai import types
 
 from app.agents.provider import InferenceRequest, InferenceResult
+from app.agents.versions import AGENT_NAME, AGENT_VERSION, PROMPT_VERSION  # noqa: F401
 from app.config import Settings
 
-AGENT_NAME = "uom_description_inference_agent"
-AGENT_VERSION = "1.1.0"
-PROMPT_VERSION = "uom-inference-v2"
 APP_NAME = "uom_cleansing"
-PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_inference_v2.md"
+PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_inference_v3.md"
 
 
 @dataclass(frozen=True)

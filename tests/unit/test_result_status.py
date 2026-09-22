@@ -48,8 +48,11 @@ def documents():
     findings = ([], [{"code": "ROUNDING_ONLY_VARIANCE"}],
                 [{"code": "ROUNDING_ONLY_VARIANCE"}, {"code": "LEGACY_UOM_MISMATCH"}])
     proposals = ({"standard_size": None, "standard_uom": None}, {"standard_size": "500", "standard_uom": "ML"}, None)
-    for group, policy, finding, proposal in product(groups, policies, findings, proposals):
+    reasons = (None, "RULE_CONVERSION", "NO_RULE")
+    for group, policy, finding, proposal, reason in product(groups, policies, findings, proposals, reasons):
         document = {"group": group, "findings": finding}
+        if reason:
+            document["reason_code"] = reason
         if policy:
             document["application_policy"] = policy
         if proposal is not None:
@@ -79,3 +82,13 @@ def test_rows_stored_by_an_older_ledger_are_still_shown_correctly():
 def test_unknown_status_is_rejected():
     with pytest.raises(ValueError):
         status_query("SOMETHING")
+
+
+def test_a_legacy_unit_with_no_rule_is_could_not_determine_not_already_correct():
+    voucher = {"group": "B", "reason_code": "NO_RULE", "application_policy": "NO_CHANGE",
+               "field_proposals": {"standard_size": None, "standard_uom": None, "standard_pack_size": None}}
+    assert effective_status(voucher) == "UNRESOLVED"
+    converted = {**voucher, "reason_code": "RULE_CONVERSION",
+                 "field_proposals": {"standard_size": "454", "standard_uom": "GM", "standard_pack_size": None},
+                 "application_policy": "AUTO_APPLY"}
+    assert effective_status(converted) == "AUTO_APPLY"

@@ -109,6 +109,7 @@ def test_the_ai_sees_description_text_only_and_is_scored_in_two_parts():
     assert set(sent) == {
         "task", "known_measurement", "item_brand_eng", "item_brand_local_lang",
         "item_desc_eng", "item_desc_local_lang", "web_description_eng", "web_description_chi",
+        "division", "category", "subcategory", "section",  # D3: context, never evidence
     }
     assert sent["known_measurement"] is None
 
@@ -122,13 +123,16 @@ def test_the_ai_sees_description_text_only_and_is_scored_in_two_parts():
 
     report = QualityService(load_default_registry()).build_report(repos.job, ITEMS)
     ai = next(row for row in report["capabilities"] if row["key"] == "ai_description_reading")
-    assert (ai["tested"], ai["agreed"], ai["awaiting_decision"], ai["no_answer"]) == (5, 2, 2, 1)
-    assert ai["accuracy_percent"] == 40.0
+    verdicts = {row["verdict"]: row["products"] for row in ai["breakdown"]}
+    # 3: text says 720G, Excel 540 -> data problem. 4: text says 650G, Excel 650 ML -> data
+    # problem. 5: the size is written and the AI missed it -> the one real miss.
+    assert verdicts == {"CORRECT": 2, "AGENT_MISS": 1, "DATA_PROBLEM": 2}
+    assert (ai["tested"], ai["agreed"], ai["match_percent"]) == (5, 2, 40.0)
+    assert (ai["scored"], ai["correct"], ai["accuracy_percent"], ai["data_problems"]) == (3, 2, 66.7, 2)
     assert ai["run"]["model_id"] == "gemini-test"
     decisions = {row["id"]: row for row in report["decisions"]}
-    assert decisions["ai_size_disagrees"]["products_affected"] == 1
-    assert decisions["ai_size_disagrees"]["example"].startswith("3: “720G” works out to 720 GM")
-    assert decisions["ai_unit_disagrees"]["products_affected"] == 1
+    # Data problems are not business-policy decisions, so they do not pad that list.
+    assert decisions["ai_size_disagrees"]["products_affected"] == 0
     assert decisions["approve_ai_reading_test"]["products_affected"] == 0
 
 
@@ -223,3 +227,114 @@ def test_only_products_without_an_answer_are_retested():
     assert len(repos.results) == 6  # earlier readings are kept, not re-bought
     score = repos.job["ai_reading_test"]["score"]
     assert (score["tested"], score["agreed"]) == (5, 2)
+
+
+class V3Provider(ReadingProvider):
+    """Answers with roles, as agent contract v3 does."""
+
+    ANSWERS = {
+        "1L MICROWAVE BOX": ("1", "L", "1L", "CAPACITY_OR_RANGE", None, None),
+        "CHEESE 180G(10GX18)": ("10", "G", "10G", "NET_CONTENT_UNIT", "18", "SELLABLE_PACK"),
+        "PASTA 500KG": ("500", "KG", "500KG", "NET_CONTENT_UNIT", None, None),
+    }
+
+    async def infer(self, request):
+        self.requests.append(request)
+        value, uom, fragment, role, pack, pack_role = self.ANSWERS[request.item_desc_eng]
+        from app.agents.provider import Evidence
+        return InferenceResponse(
+            result=InferenceResult(
+                status="PROPOSAL", rationale="test",
+                measurement=ObservedMeasurement(value=value, uom=uom, field="item_desc_eng", fragment=fragment, role=role),
+                pack_size=pack, pack_role=pack_role,
+                pack_evidence=Evidence(field="item_desc_eng", fragment="10GX18") if pack else None,
+            ),
+            metadata=ProviderMetadata(provider="google-adk", agent_name="a", agent_version="2.0.0",
+                                      prompt_version="uom-inference-v3", input_tokens=1000, output_tokens=50),
+        )
+
+
+def test_v3_scoring_rewards_the_right_behaviour():
+    pasta_shelf = [item(str(100 + n), "PASTA 500G", ("500", "GM")) for n in range(20)]
+    for row in pasta_shelf:
+        row["context"]["category"] = "Pasta"
+    box = item("1", "1L MICROWAVE BOX", ("10", "EA"))
+    cheese = item("2", "CHEESE 180G(10GX18)", ("180", "GM"))
+    pasta = item("3", "PASTA 500KG", ("500", "GM"))
+    pasta["context"]["category"] = "Pasta"
+    repos = FakeRepositories([box, cheese, pasta, *pasta_shelf])
+    repos.quality_items = lambda job_id: [box, cheese, pasta]  # only these are called
+    runner = service(repos, V3Provider())
+    _, selected = runner.start("j1")
+    repos.quality_items = lambda job_id: [box, cheese, pasta, *pasta_shelf]  # scoring sees the shelf
+    runner.run("j1", selected)
+
+    outcomes = {row["item_no"]: row["outcome"] for row in repos.results}
+    assert outcomes == {"1": "AGREES", "2": "AGREES", "3": "SENT_TO_REVIEW"}
+    notes = {e["item_no"]: e["note"] for e in repos.job["ai_reading_test"]["score"]["examples"]}
+    assert "capacity" in notes["1"] and "records this product as a count" in notes["1"]
+    assert notes["2"].startswith("Same total.")
+    assert "far outside the normal sizes" in notes["3"]
+    score = repos.job["ai_reading_test"]["score"]
+    assert (score["tested"], score["agreed"], score["no_answer"], score["disagreements"]) == (3, 2, 1, {})
+
+    history = repos.job["ai_reading_history"]
+    assert len(history) == 1
+    assert (history[0]["prompt_version"], history[0]["accuracy_percent"], history[0]["input_tokens"]) == (
+        "uom-inference-v3", 66.7, 3000,
+    )
+
+
+def test_unanswered_retest_is_refused_when_the_instructions_changed():
+    repos = FakeRepositories(ITEMS)
+    provider = ReadingProvider()
+    runner = service(repos, provider)
+    _, selected = runner.start("j1")
+    runner.run("j1", selected)
+    provider.bundle = type("Bundle", (), {"prompt_version": "uom-inference-v3"})()
+    with pytest.raises(AiReadingTestBlocked, match="instructions changed"):
+        runner.start("j1", only_unanswered=True)
+
+
+def test_declining_is_correct_when_the_true_size_is_not_written():
+    class Decliner(ReadingProvider):
+        async def infer(self, request):
+            self.requests.append(request)
+            return InferenceResponse(
+                result=InferenceResult(status="NOT_IN_DESCRIPTION", rationale="4L is a grade"),
+                metadata=ProviderMetadata(provider="google-adk", agent_name="a", agent_version="2"),
+            )
+
+    grade = item("1", "ORG BSM 4L VINEGAR", ("250", "ML"))     # 250 ML is written nowhere
+    missed = item("2", "ORANGE JUICE 250ML", ("250", "ML"))    # the size IS written: a real miss
+    repos = FakeRepositories([grade, missed])
+    runner = service(repos, Decliner())
+    _, selected = runner.start("j1")
+    runner.run("j1", selected)
+    assert {row["item_no"]: row["outcome"] for row in repos.results} == {"1": "AGREES", "2": "NO_ANSWER"}
+    note = next(e["note"] for e in repos.job["ai_reading_test"]["score"]["examples"] if e["item_no"] == "1")
+    assert "is not written in the text" in note
+
+
+def test_bundles_and_case_totals_are_the_agreed_rule_not_a_disagreement():
+    class Bundles(V3Provider):
+        ANSWERS = {
+            "SOY SAUCE 500MLx2": ("500", "ML", "500ML", "NET_CONTENT_UNIT", "2", "SELLABLE_PACK"),
+            "NOODLE 5 CASE/6 X 90GM": ("90", "GM", "90GM", "NET_CONTENT_UNIT", "6", "OUTER_CASE"),
+        }
+
+        async def infer(self, request):
+            response = await super().infer(request)
+            if response.result.pack_evidence:
+                response.result.pack_evidence.fragment = "2" if "SOY" in request.item_desc_eng else "6"
+            return response
+
+    twin = item("1", "SOY SAUCE 500MLx2", ("1", "EA"))          # team recorded a count
+    case = item("2", "NOODLE 5 CASE/6 X 90GM", ("450", "GM"))   # team recorded 5 x 90
+    repos = FakeRepositories([twin, case])
+    runner = service(repos, Bundles())
+    _, selected = runner.start("j1")
+    runner.run("j1", selected)
+    score = repos.job["ai_reading_test"]["score"]
+    assert score["verdicts"] == {"RULE_APPLIED": 2}
+    assert all("agreed rule" in example["note"] for example in score["examples"])

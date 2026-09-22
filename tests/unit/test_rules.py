@@ -9,7 +9,7 @@ from app.services.rule_engine import RuleEngine
 
 def test_default_ruleset_is_versioned_and_excludes_unresolved_units():
     registry = load_default_registry()
-    assert registry.version == "poc-v2"
+    assert registry.version == "poc-v3"
     assert len(registry.checksum) == 64
     assert registry.get("kg").rule_id == "KG_TO_GM"
     assert registry.get("Pack").rule_id == "PACK_TO_EA"
@@ -17,7 +17,10 @@ def test_default_ruleset_is_versioned_and_excludes_unresolved_units():
     for written, rule_id in (("克", "G_TO_GM"), ("公斤", "KG_TO_GM"), ("毫升", "ML_IDENTITY"),
                              ("公升", "LT_TO_ML"), ("安士", "OZ_TO_GM"), ("磅", "LB_TO_GM")):
         assert registry.get(written).rule_id == rule_id
-    for unresolved in ("FZ", "ST", "SET", "PR", "AV KG"):
+    # D2 (21 Sep 2026): the US fluid ounce is approved, which closes the open FZ question.
+    assert registry.get("FZ").rule_id == "FLOZ_TO_ML"
+    assert registry.get("fl oz").factor == Decimal("29.5735295625")
+    for unresolved in ("ST", "SET", "PR", "AV KG"):
         assert registry.get(unresolved) is None
 
 
@@ -41,7 +44,14 @@ def test_group_b_nearest_whole_matches_excel_rounding():
 
 
 def test_unknown_rule_never_guesses():
-    assert RuleEngine(load_default_registry()).propose("16", "FZ") is None
+    assert RuleEngine(load_default_registry()).propose("16", "ST") is None
+
+
+def test_fluid_ounce_uses_the_approved_us_factor():
+    result = RuleEngine(load_default_registry(), 0).propose("15", "FZ")
+    assert (result.standard_size, result.standard_uom) == (Decimal("444"), "ML")
+    # A plain OZ stays a weight; only the fluid-ounce guard may read it as volume.
+    assert RuleEngine(load_default_registry(), 0).propose("15", "OZ").standard_uom == "GM"
 
 
 def test_duplicate_enabled_source_is_rejected(tmp_path: Path):

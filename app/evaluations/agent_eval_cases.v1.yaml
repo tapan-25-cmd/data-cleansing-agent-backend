@@ -1,0 +1,104 @@
+version: agent-eval-v1
+# Real product texts from the 21 Sep 2026 blind-test audit (docs/blind-test-audit.md),
+# with the outcome the agent must reach under decisions D1-D5.
+#
+# expect.size  : the standardized value after the rule engine ("500 ML"), or DECLINE when
+#                no product size may be applied.
+# expect.pack  : the pack size that may be applied (sellable packs only), or null.
+# Every reviewer-confirmed mistake and every production defect is added here as a case.
+cases:
+  # --- a number on a container or tool is not the product size
+  - {id: capacity_microwave_box, pattern: capacity, item_no: "102210", category: Baking Aids,
+     text: {item_desc_eng: 1L MICROWAVE BOX, item_desc_local_lang: 長方微波爐盒連蓋},
+     expect: {size: DECLINE, pack: null}}
+  - {id: capacity_kitchen_scale, pattern: capacity, item_no: "105205", category: Baking Aids,
+     text: {item_desc_eng: KITCHEN SCALE, item_desc_local_lang: 電子磅(3KG)},
+     expect: {size: DECLINE, pack: null}}
+  - {id: capacity_pudding_cup, pattern: capacity, item_no: "100933", category: Baking Aids,
+     text: {item_desc_eng: 5OZ PUDDING CUP, item_desc_local_lang: 5安梅花杯連蓋},
+     expect: {size: DECLINE, pack: null}}
+  - {id: dimension_tart_ring, pattern: capacity, item_no: "098483", category: Baking Aids,
+     text: {item_desc_eng: 9CM TART RING, item_desc_local_lang: 9CM法式塔圈},
+     expect: {size: DECLINE, pack: null}}
+  # --- a number that is part of the product name or grade
+  - {id: name_protein_yoghurt, pattern: name_or_grade, item_no: "485029", category: Yoghurts And Desserts,
+     text: {item_desc_eng: 3.3G YOGHURT, item_desc_local_lang: 3.3乳酪},
+     expect: {size: DECLINE, pack: null}}
+  - {id: grade_four_leaf_vinegar, pattern: name_or_grade, item_no: "705269", category: Vinegar,
+     text: {item_desc_eng: ORG BSM 4L VINEGAR, item_desc_local_lang: 有機四葉香醋},
+     expect: {size: DECLINE, pack: null}}
+  - {id: grade_vinegar_5g, pattern: name_or_grade, item_no: "476218", category: Vinegar,
+     text: {item_desc_eng: MODENA BAL VINEGAR5G, item_desc_local_lang: 摩德納高級黑醋},
+     expect: {size: DECLINE, pack: null}}
+  - {id: year_is_not_a_size, pattern: name_or_grade, item_no: "078105", category: Wine,
+     text: {item_desc_eng: CHATEAU MUSAR 2005, item_desc_local_lang: 穆薩紅酒05年},
+     expect: {size: DECLINE, pack: null}}
+  - {id: charge_code_is_not_a_size, pattern: name_or_grade, item_no: "461970", category: Services,
+     text: {item_desc_eng: SPECIAL DEL CHG-10, item_desc_local_lang: 特別送貨服務費-10},
+     expect: {size: DECLINE, pack: null}}
+  # --- D1: unit size is one piece, pack size is the number of pieces
+  - {id: piece_inside_total, pattern: piece_vs_total, item_no: "268045", category: Dried Food,
+     text: {web_description_eng: LIGHTLY BAKED MILKY CHEESE ORIG 180G18P, web_description_chi: 鮮牛奶輕熟芝士-原味180G(10GX18)},
+     expect: {size: 10 GM, pack: 18}}
+  - {id: piece_times_count, pattern: piece_vs_total, item_no: "682922", category: Soup,
+     text: {item_desc_eng: BONITO SOUP POWDER, web_description_chi: 和食之力高湯包8G X 8P},
+     expect: {size: 8 GM, pack: 8}}
+  - {id: twin_pack, pattern: bundle, item_no: "093633", category: Sauces,
+     text: {item_desc_eng: GOLD LABEL 500MLX2, item_desc_local_lang: 金標孖裝},
+     expect: {size: 500 ML, pack: 2}}
+  - {id: bundle_of_four, pattern: bundle, item_no: "493692", category: Soup,
+     text: {web_description_eng: INSTANTSOUP COMBO 320GX4PACKS, web_description_chi: 即飲燉湯套裝320克X4包},
+     expect: {size: 320 GM, pack: 4}}
+  - {id: multipack_cups, pattern: bundle, item_no: "627026", category: Ice Cream,
+     text: {web_description_eng: SOYA BROWN SUGAR 4X100ML, web_description_chi: 黑糖豆乳雪糕4杯裝},
+     expect: {size: 100 ML, pack: 4}}
+  - {id: plain_multipack, pattern: bundle, item_no: "fixture", category: Juice,
+     text: {item_desc_eng: ORANGE JUICE 4 x 200ML},
+     expect: {size: 200 ML, pack: 4}}
+  # --- contents and outer cases are not the sellable pack
+  - {id: contents_tortilla, pattern: contents_or_case, item_no: "113233", category: Mexican Food,
+     text: {web_description_eng: TORTILLA ORIGINAL MEDIUM (8 PACK), item_desc_local_lang: 墨西哥薄餅},
+     expect: {size: DECLINE, pack: null}}
+  - {id: contents_with_total, pattern: contents_or_case, item_no: "fixture", category: Bakery,
+     text: {web_description_eng: 16PK MINI CHEESE & ONION ROLLS 480G},
+     expect: {size: 480 GM, pack: null}}
+  - {id: outer_case, pattern: contents_or_case, item_no: "242610", category: Soup,
+     text: {web_description_eng: CAMPBELL'S CHUNKY CHOWDER SOUP CASE 12 X 505GM, web_description_chi: 金寶湯新英倫周打蜆湯原箱12 X 505GM},
+     expect: {size: 505 GM, pack: null}}
+  # --- decline rather than guess
+  - {id: two_sizes_joined, pattern: decline, item_no: "269217", category: Dried Food,
+     text: {web_description_eng: ORGANIC VIRGIN COCONUT OIL 200ML+15ML, web_description_chi: 有機冷榨椰子油(200毫升+15毫升)},
+     expect: {size: DECLINE, pack: null}}
+  - {id: nothing_written, pattern: decline, item_no: "015511", category: Tea,
+     text: {item_desc_eng: GREEN TEA, item_desc_local_lang: 綠茶},
+     expect: {size: DECLINE, pack: null}}
+  - {id: pack_without_size, pattern: decline, item_no: "172593", category: Beer,
+     text: {item_desc_eng: SMALL CAN BEER 4'S, item_desc_local_lang: 4 罐裝啤酒},
+     expect: {size: DECLINE, pack: 4}}
+  - {id: conflicting_languages, pattern: decline, item_no: "fixture", category: Juice,
+     text: {item_desc_eng: JUICE 500ML, item_desc_local_lang: 果汁1公升},
+     expect: {size: DECLINE, pack: null}}
+  # --- local-language units
+  - {id: chinese_grams, pattern: local_language, item_no: "498709", category: Ready Meal,
+     text: {web_description_eng: ABALONE RICE IN POS WITH SCALLOP, web_description_chi: 蠔皇元貝鮑魚撈飯240克},
+     expect: {size: 240 GM, pack: null}}
+  - {id: chinese_millilitres, pattern: local_language, item_no: "679860", category: Ice Cream,
+     text: {web_description_chi: 雙重芝士迷你杯雪糕100毫升},
+     expect: {size: 100 ML, pack: null}}
+  - {id: chinese_litres, pattern: local_language, item_no: "494591", category: Juice,
+     text: {item_desc_local_lang: 提子汁飲品1.1公升},
+     expect: {size: 1100 ML, pack: null}}
+  - {id: chinese_ounces, pattern: local_language, item_no: "401174", category: Cooking Aids,
+     text: {item_desc_eng: GARLIC SALT, item_desc_local_lang: 蒜鹽3安士},
+     expect: {size: 85 GM, pack: null}}
+  - {id: chinese_pack_words, pattern: local_language, item_no: "fixture", category: Noodles,
+     text: {item_desc_local_lang: 辣味烏龍麵120克5包裝},
+     expect: {size: 120 GM, pack: 5}}
+  # --- plain cases that must keep working
+  - {id: plain_millilitres, pattern: plain, item_no: "fixture", category: Juice,
+     text: {item_desc_eng: ORGANIC JUICE 500ML}, expect: {size: 500 ML, pack: null}}
+  - {id: plain_kilograms, pattern: plain, item_no: "fixture", category: Flour,
+     text: {item_desc_eng: FLOUR 1 KG}, expect: {size: 1000 GM, pack: null}}
+  - {id: both_languages_agree, pattern: plain, item_no: "fixture", category: Sauces,
+     text: {item_desc_eng: BLACK PEPPER GRINDER190GM, item_desc_local_lang: 即磨黑胡椒190克},
+     expect: {size: 190 GM, pack: null}}

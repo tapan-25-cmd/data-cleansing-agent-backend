@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from app.services.guards import GUARD_REVIEW_CODES
+
 
 RESULT_LEDGER_VERSION = "result-ledger-v2"
 AUDIT_FIELDS = ("standard_size", "standard_uom", "standard_pack_size")
@@ -17,6 +19,11 @@ _FINDING_METADATA = {
         "SOURCE_DISCREPANCY",
         "REVIEW",
         "Standardized size differs materially from legacy conversion",
+    ),
+    "LEGACY_NOT_COMPARABLE": (
+        "VALIDATION",
+        "INFO",
+        "Could not be double-checked against the legacy data",
     ),
     "LEGACY_UOM_MISMATCH": (
         "SOURCE_DISCREPANCY",
@@ -48,6 +55,51 @@ _FINDING_METADATA = {
         "INFO",
         "An OZ value may be a fluid ounce, so weight and volume were not compared",
     ),
+    "OUNCE_MAY_BE_FLUID": (
+        "UNIT_AMBIGUITY",
+        "REVIEW",
+        "OZ could be a weight or a fluid ounce",
+    ),
+    "OUNCE_READ_AS_FLUID": (
+        "UNIT_AMBIGUITY",
+        "INFO",
+        "OZ was converted as fluid ounces",
+    ),
+    "TEXT_CONTRADICTS_RESULT": (
+        "DESCRIPTION_CONFLICT",
+        "REVIEW",
+        "The description does not fit the converted value",
+    ),
+    "SIZE_OUTSIDE_CATEGORY_RANGE": (
+        "PLAUSIBILITY",
+        "REVIEW",
+        "The size is far outside what is normal for this category",
+    ),
+    "LEGACY_MAY_BE_PACK_TOTAL": (
+        "PACKAGING_HIERARCHY",
+        "REVIEW",
+        "The legacy size looks like the whole pack, not one piece",
+    ),
+    "AI_PACK_NEEDS_CONFIRMATION": (
+        "PACK_EVIDENCE",
+        "REVIEW",
+        "The AI read a pack size that a person should confirm",
+    ),
+    "SIZE_UNUSUAL_FOR_CATEGORY": (
+        "PLAUSIBILITY",
+        "INFO",
+        "The size is unusual for this category",
+    ),
+    "AI_MEASUREMENT_NOT_PRODUCT_SIZE": (
+        "PLAUSIBILITY",
+        "REVIEW",
+        "The number the AI read does not describe the amount of product",
+    ),
+    "COUNT_IN_MEASURED_CATEGORY": (
+        "INSUFFICIENT_EVIDENCE",
+        "INFO",
+        "Only a count is available for this product",
+    ),
     "DESCRIPTION_MEASUREMENT_MISMATCH": (
         "DESCRIPTION_CONFLICT",
         "WARNING",
@@ -58,6 +110,11 @@ _FINDING_METADATA = {
         "INFO",
         "Agent found no explicit size or UOM",
     ),
+    "UNMAPPED_SOURCE_UOM": (
+        "INSUFFICIENT_EVIDENCE",
+        "INFO",
+        "The legacy unit has no agreed conversion",
+    ),
     "AGENT_PROCESSING_ERROR": (
         "AGENT_PROCESSING",
         "ERROR",
@@ -65,7 +122,7 @@ _FINDING_METADATA = {
     ),
 }
 
-REVIEW_CODES = frozenset({
+REVIEW_CODES = GUARD_REVIEW_CODES | frozenset({
     "SIGNIFICANT_LEGACY_SIZE_MISMATCH",
     "LEGACY_UOM_MISMATCH",
     "PACKAGING_HIERARCHY_AMBIGUOUS",
@@ -170,7 +227,8 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
     """Add stable, UI/export-ready findings and field-level change records."""
     item = deepcopy(source)
     validation = item.get("validation") or {}
-    issues = list(validation.get("issues") or [])
+    # Guards use the same issue shape as validation, so both become findings.
+    issues = list(validation.get("issues") or []) + list(item.get("guards") or [])
     findings = [_finding(issue) for issue in issues]
     issue_codes = {str(issue.get("code")) for issue in issues}
     discrepancy_findings = _discrepancy_findings(item, issue_codes)
@@ -198,8 +256,26 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
 
     has_proposal = any(proposals.get(field) is not None for field in AUDIT_FIELDS)
     requires_review = bool(issue_codes & REVIEW_CODES)
+    no_size = proposals.get("standard_size") is None and proposals.get("standard_uom") is None
+    rule_unresolved = (
+        item.get("group") == "B" and no_size
+        and item.get("reason_code") in {"NO_RULE", "MALFORMED_VALUE"}
+    )
     agent_unresolved = item.get("group") == "C" and not has_proposal
-    if agent_unresolved:
+    if rule_unresolved and not has_proposal:
+        legacy_uom = str(original.get("legacy_uom") or "this unit")
+        findings.append(_finding({
+            "code": "UNMAPPED_SOURCE_UOM",
+            "field": "legacy_uom",
+            "severity": "INFO",
+            "message": (
+                f"The legacy unit {legacy_uom} has no agreed conversion, so the size could "
+                "not be filled in. It was left blank rather than guessed."
+            ),
+            "current_value": legacy_uom,
+        }))
+        policy = "UNRESOLVED"
+    elif agent_unresolved:
         error = str(item.get("reason_code") or "") in {
             "AI_PROVIDER_ERROR", "AI_INVALID_RESPONSE"
         }

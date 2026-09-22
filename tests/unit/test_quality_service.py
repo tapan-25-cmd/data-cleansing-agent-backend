@@ -65,13 +65,15 @@ def test_matches_count_as_agreement_and_disagreements_wait_for_a_decision():
         item("3", legacy=("12.3", "OZ"), klm=("375", "GM", "1")),    # 349 vs 375: disagrees
         item("4", legacy=("10", "PC"), klm=("200", "GM", "1")),      # EA vs GM: different kind
         item("5", legacy=("4.5", "GM"), klm=("4.5", "GM", "1")),     # identity keeps decimals
-        item("6", legacy=("16", "FZ"), klm=("473", "ML", "1")),      # no rule: not tested
+        item("6", legacy=("16", "ST"), klm=("473", "ML", "1")),      # no rule: not tested
         item("7", group="B", legacy=("1", "KG"), klm=("1", "KG", None)),  # not an answer key
     ])
 
     unit = capability(report, "unit_conversion")
     assert (unit["tested"], unit["agreed"], unit["awaiting_decision"]) == (5, 3, 2)
-    assert unit["accuracy_percent"] == 60.0
+    # Matching Excel is 3 of 5, but nothing shows the agent was wrong on the other two, so
+    # they are left out of the score rather than counted against it.
+    assert (unit["match_percent"], unit["scored"], unit["accuracy_percent"]) == (60.0, 3, 100.0)
     assert unit["state"] == "AWAITING_DECISION"
     assert (unit["confirmed_correct"], unit["confirmed_incorrect"]) == (0, 0)
     assert decision(report, "legacy_size_disagrees")["products_affected"] == 1
@@ -151,14 +153,12 @@ def test_one_overall_accuracy_figure_covers_every_blind_check(monkeypatch):
     items = [
         item("1", desc="JUICE 4 x 200ML", klm=("1000", "GM", "4")),          # unit ok, pack ok
         item("2", desc="DACE 12 X 227GM", klm=("1000", "GM", "36")),          # unit ok, pack differs
-        item("3", legacy=("12.3", "OZ"), klm=("375", "GM", "1")),             # unit differs
+        item("3", legacy=("12.3", "OZ"), klm=("375", "GM", "1")),             # unit differs, no witness
     ]
-    report = service().build_report({}, items)
-    assert report["accuracy"] == {
-        "checks": 5, "correct": 3, "percent": 60.0, "awaiting_decision": 2, "no_answer": 0,
-        "confirmed_incorrect": 0, "potential_percent": 100.0,
-        "capabilities_measured": 2, "capabilities_total": 3,
-    }
+    accuracy = service().build_report({}, items)["accuracy"]
+    assert (accuracy["checks"], accuracy["scored"], accuracy["correct"], accuracy["percent"]) == (5, 3, 3, 100.0)
+    assert (accuracy["awaiting_decision"], accuracy["misses"], accuracy["match_percent"]) == (2, 0, 60.0)
+    assert sum(row["products"] for row in accuracy["breakdown"]) == accuracy["checks"]
 
     version, decisions = load_business_decisions()
     decided = tuple(
@@ -170,8 +170,28 @@ def test_one_overall_accuracy_figure_covers_every_blind_check(monkeypatch):
     )
     monkeypatch.setattr(quality_service, "load_business_decisions", lambda: (version, decided))
     accuracy = service().build_report({}, items)["accuracy"]
-    assert (accuracy["correct"], accuracy["percent"], accuracy["confirmed_incorrect"]) == (4, 80.0, 1)
-    assert (accuracy["awaiting_decision"], accuracy["potential_percent"]) == (0, 80.0)
+    # One decided for the agent, one against: both are now scored.
+    assert (accuracy["scored"], accuracy["correct"], accuracy["misses"], accuracy["percent"]) == (5, 4, 1, 80.0)
+    assert accuracy["awaiting_decision"] == 0
+
+
+def test_the_description_is_the_witness_between_legacy_and_excel():
+    data_problem = item("1", legacy=("3", "OZ"), klm=("170", "GM", "1"), desc="GARLIC SALT 85G")
+    caught = item("2", legacy=("220", "GM"), klm=("255", "GM", "1"), desc="XO SAUCE 255G")
+    report = service().build_report({}, [data_problem, caught, item("3")])
+    unit = capability(report, "unit_conversion")
+    verdicts = {row["verdict"]: row["products"] for row in unit["breakdown"]}
+    # 1: text backs the agent (85 GM), Excel says 170 -> a problem in the data, not scored.
+    # 2: text backs Excel; production would stop the legacy value -> a correct catch.
+    assert verdicts == {"CORRECT": 1, "CORRECT_CATCH": 1, "DATA_PROBLEM": 1}
+    assert (unit["scored"], unit["correct"], unit["data_problems"], unit["accuracy_percent"]) == (2, 2, 1, 100.0)
+    assert report["accuracy"]["bad_values_stopped"] == 1
+
+
+def test_a_whole_pack_total_is_an_honest_miss():
+    report = service().build_report({}, [item("1", legacy=("350", "GM"), klm=("70", "GM", "5")), item("2")])
+    unit = capability(report, "unit_conversion")
+    assert (unit["misses"], unit["scored"], unit["accuracy_percent"]) == (1, 2, 50.0)
 
 
 def produced(item_no, *, group="B", before=("1", "KG"), legacy=("1", "KG"), result=("1000", "GM"),
@@ -251,3 +271,78 @@ def test_verification_sample_is_repeatable_and_shows_existing_verdicts():
     assert first["rows"][0]["before"] == "1 KG × 1" and first["rows"][0]["result"] == "1000 GM × 1"
     full = QualityService.verification_sample("job-1", items, "CONVERTED", 40)
     assert [row["verdict"] for row in full["rows"] if row["item_no"] == "7"] == ["WRONG"]
+
+
+def shelf(category, uom, count=20, size="1000"):
+    rows = []
+    for n in range(count):
+        row = item(str(500 + len(category) * 100 + n), legacy=(size, uom), klm=(size, uom, "1"))
+        row["context"]["category"] = category
+        rows.append(row)
+    return rows
+
+
+def in_category(row, category):
+    row["context"]["category"] = category
+    return row
+
+
+def test_blind_test_reads_ounces_the_way_production_does():
+    milk = in_category(item("1", legacy=("48", "OZ"), klm=("1420", "ML", "1")), "Fresh Milk")
+    sauce = in_category(item("2", legacy=("9", "OZ"), klm=("266", "ML", "1")), "Sauces")
+    flour = in_category(item("3", legacy=("16", "OZ"), klm=("454", "GM", "1")), "Flour")
+    mixed_shelf = shelf("Sauces", "ML", 10, "300") + [
+        in_category(item(str(900 + n), legacy=("300", "GM"), klm=("300", "GM", "1")), "Sauces") for n in range(10)
+    ]
+    report = service().build_report({}, [
+        milk, sauce, flour, *shelf("Fresh Milk", "ML"), *mixed_shelf, *shelf("Flour", "GM"),
+    ])
+    examples = {e["item_no"]: e for e in capability(report, "unit_conversion")["examples"]}
+    assert "1" not in examples or examples["1"]["agrees"]       # fluid ounce: 48 OZ -> 1420 ML
+    assert (examples["2"]["kind"], examples["2"]["agent"]) == ("SENT_TO_REVIEW", "A person decides")
+    # Excel holds 266 ML, so the plain weight conversion would have been wrong: a correct catch.
+    assert examples["2"]["verdict"] == "CORRECT_CATCH"
+    assert capability(report, "unit_conversion")["no_answer"] == 1
+    assert report["engine"]["liquid_categories"] == ["Fresh Milk"]
+    assert report["engine"]["mixed_categories"] == ["Sauces"]
+
+
+def test_whole_pack_totals_are_scored_by_the_recorded_decision():
+    noodles = item("1", legacy=("350", "GM"), klm=("70", "GM", "5"))
+    report = service().build_report({}, [noodles, item("2")])
+    unit = capability(report, "unit_conversion")
+    # D1 is recorded as decided: unit size is one piece, so this counts against the agent.
+    assert (unit["agreed"], unit["awaiting_decision"], unit["confirmed_incorrect"]) == (1, 0, 1)
+    decided = decision(report, "legacy_is_whole_pack")
+    assert (decided["status"], decided["resolution"], decided["products_affected"]) == ("DECIDED", "EXCEL_CORRECT", 1)
+    assert "same total" in decided["example"]
+
+
+def test_label_rounding_counts_as_the_same_answer():
+    report = service().build_report({}, [item("1", legacy=("5", "LB"), klm=("2270", "GM", "1"))])
+    assert capability(report, "unit_conversion")["agreed"] == 1
+
+
+def test_safety_checks_and_engine_are_reported_in_plain_language():
+    guarded = item("1", group="B", policy="REVIEW_REQUIRED")
+    guarded["guards"] = [{"code": "OUNCE_MAY_BE_FLUID", "message": "9 OZ could be a weight (255 GM) or fluid ounces (266 ML)."}]
+    noted = item("2", group="B", policy="AUTO_APPLY")
+    noted["guards"] = [{"code": "COUNT_IN_MEASURED_CATEGORY", "message": "Only a count."}]
+    job = {"ruleset_version": "poc-v3", "validation_policy": {"guards_version": "guards-v1"},
+           "ai_reading_test": {"status": "COMPLETED", "prompt_version": "uom-inference-v2", "score": None}}
+    report = service().build_report(job, [guarded, noted])
+
+    assert [row["key"] for row in report["safety_checks"]] == ["OUNCE_MAY_BE_FLUID", "COUNT_IN_MEASURED_CATEGORY"]
+    first = report["safety_checks"][0]
+    assert (first["products"], first["effect"]) == (1, "Sent to a person with both values")
+    assert first["example"].startswith("1 (") and "266 ML" in first["example"]
+    engine = report["engine"]
+    assert (engine["prompt_version"], engine["ruleset_version"], engine["processed_with_guards"]) == (
+        "uom-inference-v3", "poc-v3", True,
+    )
+    assert engine["ai_test_is_current"] is False  # measured with v2 instructions
+    old_job = service().build_report({}, [item("3")])
+    assert old_job["engine"]["processed_with_guards"] is False and old_job["safety_checks"] == []
+    for row in report["safety_checks"]:
+        for jargon in ("guard", "K/L/M", "Group", "deterministic", "regex"):
+            assert jargon not in row["check"] + row["effect"]

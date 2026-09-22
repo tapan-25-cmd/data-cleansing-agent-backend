@@ -12,6 +12,7 @@ from app.services.discrepancy_service import (
     DiscrepancyReport,
     analyze_discrepancies,
     matches_value,
+    within_conversion_tolerance,
     packaging_levels,
 )
 from app.services.excel_reader import FIELD_MAP, WorkbookRow
@@ -355,7 +356,11 @@ class GroupAValidator:
         if proposal is None:
             return [ValidationIssue(
                 "LEGACY_NOT_COMPARABLE", "legacy_uom", ValidationSeverity.INFO,
-                "Legacy value has no deterministic comparison rule",
+                (
+                    f"We could not double-check this value against the legacy data, because "
+                    f"the legacy unit {product.legacy_uom} has no agreed conversion. The Excel "
+                    "value was kept as it is."
+                ),
                 product.legacy_uom,
             )]
         if proposal.standard_uom != standard_uom:
@@ -375,17 +380,16 @@ class GroupAValidator:
             else proposal.standard_size
         )
         if expected_size != standard_size:
-            difference = abs(expected_size - standard_size)
             identity = (
                 proposal.source_uom == proposal.target_uom
                 and proposal.factor == Decimal("1")
             )
-            if not identity and difference <= Decimal("1"):
+            if not identity and within_conversion_tolerance(expected_size, standard_size):
                 return [ValidationIssue(
                     "ROUNDING_ONLY_VARIANCE",
                     "standard_size",
                     ValidationSeverity.INFO,
-                    "Existing standardized size is within the approved one-unit conversion tolerance",
+                    "Existing standardized size is within the approved conversion tolerance (1 unit or 1%)",
                     str(standard_size),
                     str(expected_size),
                 )]

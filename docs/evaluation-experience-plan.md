@@ -8,9 +8,42 @@ page uses tables, plain language, and no internal vocabulary (no groups, rule id
 finding codes, or "K/L/M").
 
 Route: `/jobs/:jobId/performance` · API: `GET /api/jobs/{job_id}/quality` ·
-Service: `backend/app/services/quality_service.py` (`quality-report-v3`).
+Service: `backend/app/services/quality_service.py` (`quality-report-v5`).
 
-## Headline: accuracy of what the agent produced (agreed 21 Sep 2026, option A)
+## Headline: Agent accuracy (agreed 22 Sep 2026)
+
+The page leads with one figure: **how often the agent did the right thing**. "Matches
+Excel" is shown only as a supporting number, because Excel itself contains mistakes and
+the agent must not be marked down for them.
+
+Every check lands in exactly one verdict, so the table always adds up:
+
+| Verdict | Meaning | Counts as |
+|---|---|---|
+| `CORRECT` | same answer as the team | Correct |
+| `CORRECT_CATCH` | the agent stopped and asked a person, and its reading really did conflict with Excel (500 KG pasta; grams on a product entered in millilitres; a legacy value the description contradicts) | Correct |
+| `RULE_APPLIED` | the agent followed D1 and Excel records the same product differently (a twin pack as `1 EA × 2`; a case as its total) | Correct |
+| `AGENT_MISS` | the agent was wrong (legacy holds the whole pack), or asked a person when it did not need to | Miss |
+| `DATA_PROBLEM` | the product's own description states the agent's value and not Excel's | Not scored |
+| `NEEDS_DECISION` | the two differ and nothing in the workbook says which is right | Not scored |
+
+**Agent accuracy = correct ÷ (correct + misses).** The two "not scored" verdicts are in
+neither number (the cautious choice: nobody has checked the pack, so they are not claimed
+as correct). A recorded business decision moves `NEEDS_DECISION` products into correct or
+miss. Each verdict is set by a rule a client can check, never by opinion.
+
+**v0.2, live AI (prompt v3):** Agent accuracy **98.8%** (12,036 of 12,188); 152 misses (148
+are whole-pack totals, an honest miss under D1); 29 questionable values stopped; 6 data
+problems found; 249 awaiting decision; matches Excel 96.4%. By skill: unit conversion
+98.7%, pack size 100% of the scorable, AI description reading 99.7% (one miss: a 1 G
+sweetener sachet the size check stopped unnecessarily).
+
+Page order: warnings (only if any) → headline → where every check ended up → accuracy by
+skill with examples → safety checks → tricky descriptions → decisions → verify a sample of
+the agent's real output → workload → versions and engineering checks (collapsed).
+
+## Verifying the agent's real output
+
 
 The page leads with the accuracy of the agent's **results** — every action it applied
 and every suggestion it made — not with agreement against data that already existed.
@@ -137,6 +170,23 @@ Ruleset `poc-v2` adds the local-language spellings (`克`, `公斤`, `毫升`, `
 `磅`), which also fixes the same loss in normal processing. Raw readings are now stored,
 so a later rule change can be re-scored for free (`POST …/ai-reading-test/rescore`), and
 `only_unanswered` re-tests just the products without an answer.
+
+## Page v4 (21 Sep 2026): the smarter engine, made visible
+
+- **Engine strip:** agent, AI-instruction, rules and safety-check versions. It warns when
+  the workbook was processed by an older engine, or when the AI score was measured with
+  older instructions.
+- **Blind test on the current engine:** reads ounces by category (US fluid ounce), uses the
+  1% tolerance, and labels whole-pack totals, which are scored by the recorded D1 decision.
+  Where production would ask a person, the test shows "Sent to a person", never "correct".
+- **Safety checks table:** what each check caught in this workbook, in plain words, with a
+  real example, plus which categories the agent learned are sold by volume.
+- **Tricky descriptions:** the 30 hard cases, run on request (30 paid calls), with every run
+  listed by AI-instruction version and the *wrong and confident* count.
+- **AI run history:** each AI reading test by instruction version, so v2 and v3 can be
+  compared on the same products. Readings from different versions are never blended.
+- **Fairer AI scoring:** leaving a size blank for a product the team records as a count
+  (the 1L microwave box) is correct; the same total split differently is agreement.
 
 ## Not built yet
 

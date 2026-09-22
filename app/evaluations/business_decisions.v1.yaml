@@ -1,4 +1,4 @@
-version: business-decisions-v2
+version: business-decisions-v3
 # Open questions shown to stakeholders on the Agent performance page.
 #
 # `counts_from` ties a decision to the products it affects in a processed workbook:
@@ -22,6 +22,24 @@ decisions:
       - Decide product by product in review
     unlocks: Scores these products for or against the agent in unit conversion.
     counts_from: benchmark:unit_conversion:SIZE
+
+  - id: legacy_is_whole_pack
+    title: The legacy size is the whole pack, but your team entered one piece × pack size
+    why_it_matters: >-
+      For these products the legacy data holds the total (350 GM) while Excel holds one piece
+      and a pack size (70 GM × 5). It is the same product described two ways.
+    options:
+      - Unit size is one piece (Excel is right)
+      - Unit size is the whole sellable item (the legacy value is right)
+    unlocks: Scores these products in unit conversion.
+    counts_from: benchmark:unit_conversion:PACK_TOTAL
+    status: DECIDED
+    resolution: EXCEL_CORRECT
+    decided_note: >-
+      Decided 21 Sep 2026 (D1): unit size is one piece and pack size is the number of pieces.
+      85% of multi-piece products already follow this. The agent cannot see the split in the
+      legacy data alone, so these count against it; it raises them for review when the
+      description states the per-piece size.
 
   - id: legacy_unit_different_kind
     title: The legacy unit and the Excel unit measure different things. Which do we trust?
@@ -82,6 +100,11 @@ decisions:
       - Another definition (please specify)
     unlocks: Lets the agent check and correct case-pack products automatically.
     counts_from: finding:PACKAGING_HIERARCHY_AMBIGUOUS
+    status: DECIDED
+    decided_note: >-
+      Decided 21 Sep 2026 (D1): size is one piece and pack size is the number of pieces in the
+      case (CASE 12 X 505GM is 505 GM × 12). Excel is not consistent for case packs, so these
+      products still go to a person.
 
   - id: loose_piece_counts
     title: Does "1PC" or "12S" in a description count as the pack size?
@@ -96,7 +119,7 @@ decisions:
     counts_from: pack_clue_needs_policy
 
   - id: units_without_conversion
-    title: Some units have no agreed conversion (for example FZ, ST, SET). What should they become?
+    title: Some units have no agreed conversion (for example ST, SET). What should they become?
     why_it_matters: >-
       The agent never invents a conversion factor. Products using these units are left
       unchanged until a rule is agreed.

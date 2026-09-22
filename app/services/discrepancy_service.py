@@ -37,9 +37,17 @@ BILINGUAL_PAIRS = (
     ("web_desc", ("web_description_eng",), ("web_description_chi",)),
 )
 
-# Converted comparisons (for example 16 OZ versus 454 GM) tolerate the same one
-# base-unit rounding difference that Group A validation already accepts.
+# D4: converted values agree within one base unit or 1%, whichever is larger. Metric
+# figures on labels are rounded to about three significant figures (5 LB is printed as
+# 2.27 kg), so 2268 GM and 2270 GM are the same product. The tolerance only decides
+# whether a difference is raised; it never changes a value.
 CONVERSION_TOLERANCE = Decimal("1")
+CONVERSION_TOLERANCE_RATIO = Decimal("0.01")
+
+
+def within_conversion_tolerance(left: Decimal, right: Decimal) -> bool:
+    allowed = max(CONVERSION_TOLERANCE, max(abs(left), abs(right)) * CONVERSION_TOLERANCE_RATIO)
+    return abs(left - right) <= allowed
 
 # token -> (source UOM, normalized UOM, dimension, factor)
 _UNITS: dict[str, tuple[str, str, str, Decimal]] = {
@@ -267,7 +275,7 @@ def extract_product_signals(product: InputProduct) -> dict[str, FieldSignals]:
 def values_equivalent(left: Decimal, right: Decimal, *, converted: bool) -> bool:
     if left == right:
         return True
-    return converted and abs(left - right) <= CONVERSION_TOLERANCE
+    return converted and within_conversion_tolerance(left, right)
 
 
 def measurements_equivalent(left: MeasurementSignal, right: MeasurementSignal) -> bool:
@@ -283,7 +291,7 @@ def matches_value(value: Decimal, target: Decimal, *, converted: bool) -> bool:
         return True
     if value.quantize(Decimal("1"), rounding=ROUND_HALF_UP) == target:
         return True
-    return converted and abs(value - target) <= CONVERSION_TOLERANCE
+    return converted and within_conversion_tolerance(value, target)
 
 
 def text_check(
@@ -334,7 +342,7 @@ def _levels_overlap(
 ) -> bool:
     return any(
         left_dimension == right_dimension
-        and abs(left_value - right_value) <= CONVERSION_TOLERANCE
+        and within_conversion_tolerance(left_value, right_value)
         for left_dimension, left_value in left
         for right_dimension, right_value in right
     )

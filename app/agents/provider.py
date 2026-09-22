@@ -23,6 +23,27 @@ AllowedEvidenceField: TypeAlias = Literal[
     "web_description_chi",
 ]
 
+# What a measurement in the text describes. Only the first two can become a product size;
+# the backend enforces that whatever the model recommends (guard G1).
+MeasurementRole: TypeAlias = Literal[
+    "NET_CONTENT_UNIT",      # amount of product in one piece
+    "NET_CONTENT_TOTAL",     # amount of product in the whole sellable item
+    "CAPACITY_OR_RANGE",     # what a container, tool or appliance holds or measures
+    "DIMENSION",             # length, diameter, thickness
+    "NAME_OR_GRADE",         # part of a name, grade, recipe or nutrition claim
+    "UNCLEAR",
+]
+PackRole: TypeAlias = Literal["SELLABLE_PACK", "CONTENTS", "OUTER_CASE", "UNCLEAR"]
+PRODUCT_SIZE_ROLES = frozenset({"NET_CONTENT_UNIT", "NET_CONTENT_TOTAL"})
+
+_REASON_FOR_STATUS = {
+    "PROPOSAL": "EXPLICIT_MEASUREMENT",
+    "PACK_PROPOSAL": "EXPLICIT_PACK_COUNT",
+    "NOT_IN_DESCRIPTION": "NOT_IN_DESCRIPTION",
+    "AMBIGUOUS": "AMBIGUOUS_DESCRIPTION",
+    "CONFLICT": "DESCRIPTION_CONFLICT",
+}
+
 AgentReasonCode: TypeAlias = Literal[
     "EXPLICIT_MEASUREMENT",
     "EXPLICIT_PACK_COUNT",
@@ -68,6 +89,13 @@ class InferenceRequest(BaseModel):
     item_desc_local_lang: str | None = None
     web_description_eng: str | None = None
     web_description_chi: str | None = None
+    # D3: category context. It helps the agent tell a tool from a food, but it is never
+    # evidence: a fragment may only be cited from the six text fields above. Columns B/C,
+    # legacy values and the standardized fields have no place in this request.
+    division: str | None = None
+    category: str | None = None
+    subcategory: str | None = None
+    section: str | None = None
 
 
 class Evidence(BaseModel):
@@ -82,6 +110,8 @@ class ObservedMeasurement(BaseModel):
     uom: str = Field(min_length=1, max_length=20)
     field: AllowedEvidenceField
     fragment: str = Field(min_length=1)
+    # Absent on readings stored before agent contract v3; treated as a product size.
+    role: MeasurementRole | None = None
 
     @field_validator("uom")
     @classmethod
@@ -95,6 +125,10 @@ class ObservedMeasurement(BaseModel):
             raise ValueError("measurement value must be positive")
         return value
 
+    @property
+    def describes_product_size(self) -> bool:
+        return self.role is None or self.role in PRODUCT_SIZE_ROLES
+
 
 class InferenceResult(BaseModel):
     status: Literal["PROPOSAL", "PACK_PROPOSAL", "NOT_IN_DESCRIPTION", "AMBIGUOUS", "CONFLICT"]
@@ -102,8 +136,16 @@ class InferenceResult(BaseModel):
     pack_size: Decimal | None = None
     pack_evidence: Evidence | None = None
     conflicting_measurements: list[ObservedMeasurement] = Field(default_factory=list)
-    confidence: Literal["HIGH", "MEDIUM", "LOW"]
-    reason_code: AgentReasonCode
+    # Every other measurement the agent saw, with its role, so a choice can be audited
+    # ("saw 180G and preferred 10G") and a non-size number is visible, not silently used.
+    other_measurements: list[ObservedMeasurement] = Field(default_factory=list)
+    pack_role: PackRole | None = None
+    rationale: str | None = Field(default=None, max_length=400)
+    # The model's own confidence is recorded but never drives a decision; the pipeline
+    # derives confidence from guards and agreeing sources.
+    confidence: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
+    # Fully determined by status, so the model no longer has to supply it.
+    reason_code: AgentReasonCode | None = None
 
     @model_validator(mode="after")
     def validate_status_shape(self) -> "InferenceResult":
@@ -120,13 +162,11 @@ class InferenceResult(BaseModel):
                 raise ValueError("PACK_PROPOSAL cannot contain measurement observations")
             if self.pack_size is None or self.pack_evidence is None:
                 raise ValueError("PACK_PROPOSAL requires pack size and evidence")
+        # "No size written" may still carry an explicit pack count ("SMALL CAN BEER 4'S").
         if self.status == "NOT_IN_DESCRIPTION" and (
-            self.measurement is not None
-            or self.pack_size is not None
-            or self.pack_evidence is not None
-            or self.conflicting_measurements
+            self.measurement is not None or self.conflicting_measurements
         ):
-            raise ValueError("NOT_IN_DESCRIPTION cannot contain observations")
+            raise ValueError("NOT_IN_DESCRIPTION cannot contain a measurement")
         if self.status == "AMBIGUOUS" and (
             self.measurement is not None
             or self.pack_size is not None
@@ -141,14 +181,10 @@ class InferenceResult(BaseModel):
                 raise ValueError("CONFLICT requires at least two observations")
         if (self.pack_size is None) != (self.pack_evidence is None):
             raise ValueError("pack size and pack evidence must be supplied together")
-        expected_reason = {
-            "PROPOSAL": "EXPLICIT_MEASUREMENT",
-            "PACK_PROPOSAL": "EXPLICIT_PACK_COUNT",
-            "NOT_IN_DESCRIPTION": "NOT_IN_DESCRIPTION",
-            "AMBIGUOUS": "AMBIGUOUS_DESCRIPTION",
-            "CONFLICT": "DESCRIPTION_CONFLICT",
-        }[self.status]
-        if self.reason_code != expected_reason:
+        expected_reason = _REASON_FOR_STATUS[self.status]
+        if self.reason_code is None:
+            self.reason_code = expected_reason  # type: ignore[assignment]
+        elif self.reason_code != expected_reason:
             raise ValueError(f"{self.status} requires reason code {expected_reason}")
         return self
 
@@ -164,6 +200,8 @@ class ProviderMetadata(BaseModel):
     attempt_count: int = 1
     latency_ms: int = 0
     session_id: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 class InferenceResponse(BaseModel):
@@ -183,6 +221,7 @@ def validate_evidence(request: InferenceRequest, result: InferenceResult) -> Non
     if result.pack_evidence:
         evidence_items.append(result.pack_evidence)
     evidence_items.extend(result.conflicting_measurements)
+    evidence_items.extend(result.other_measurements)
     for evidence in evidence_items:
         if evidence.field not in ALLOWED_EVIDENCE_FIELDS:
             raise ValueError(f"forbidden evidence field: {evidence.field}")

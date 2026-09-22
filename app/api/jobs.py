@@ -9,6 +9,7 @@ from app.api.dependencies import processor, repositories, storage
 from app.domain.enums import R1_DEPARTMENTS
 from app.repositories.mongo import MongoRepositories
 from app.services.excel_reader import ExcelReader, WorkbookValidationError
+from app.services.export_service import EXPORT_VERSION
 from app.services.processor import JobProcessor
 from app.services.result_status import effective_status, status_query
 from app.storage.local import LocalFileStorage, UploadTooLargeError
@@ -80,6 +81,9 @@ def get_job(job_id: str, repos: Annotated[MongoRepositories, Depends(repositorie
     job = repos.get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+    # A workbook built by an earlier exporter is offered for rebuilding rather than
+    # handed over as-is, so a fix to the export reaches jobs already downloaded once.
+    job["export_current"] = job.get("export_version") == EXPORT_VERSION
     return job
 
 

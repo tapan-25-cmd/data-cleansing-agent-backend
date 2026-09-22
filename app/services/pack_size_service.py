@@ -11,7 +11,7 @@ from app.domain.product import InputProduct
 from app.services.normalization import blank
 
 
-PACK_EXTRACTION_VERSION = "pack-extraction-v1"
+PACK_EXTRACTION_VERSION = "pack-extraction-v2"
 PACK_FIELDS = (
     ("item_desc_eng", "item_desc_eng"),
     ("item_desc_local_lang", "item_desc_local"),
@@ -66,7 +66,8 @@ class PackAssessment:
         }
 
 
-_MEASUREMENT = r"\d+(?:\.\d+)?\s*(?:ml|millilit(?:er|re)s?|l|lt|lit(?:er|re)s?|g|gm|grams?|kg|oz|lb|ft)\b"
+# The unit ends at a word boundary, or at a glued multiplier such as ``190GMX3``.
+_MEASUREMENT = r"\d+(?:\.\d+)?\s*(?:ml|millilit(?:er|re)s?|l|lt|lit(?:er|re)s?|g|gm|grams?|kg|oz|lb|ft)(?:\b|(?=[x×]\s*\d))"
 _PATTERNS = (
     ("COUNT_X_MEASUREMENT", re.compile(rf"(?<![\w.])(?P<count>\d+)\s*(?:x|×)\s*{_MEASUREMENT}", re.IGNORECASE)),
     ("MEASUREMENT_X_COUNT", re.compile(rf"{_MEASUREMENT}\s*(?:x|×)\s*(?P<count>\d+)(?![\w.])", re.IGNORECASE)),
@@ -80,6 +81,11 @@ _PATTERNS = (
         re.IGNORECASE,
     )),
 )
+# D1: a pack word alone ("TORTILLA (8 PACK)" 320 GM) says how many pieces are inside,
+# not that each piece is a sellable unit with its own size. It becomes a pack size only
+# when the text also gives the per-piece structure ("4 PK x 250 GM", "3PK (190GMX3)").
+_WORD_PATTERNS = frozenset({"PACK_OF_COUNT", "COUNT_PACK"})
+_FOLLOWED_BY_SIZE = re.compile(rf"\s*(?:x|×)\s*{_MEASUREMENT}", re.IGNORECASE)
 _PACK_HINT = re.compile(
     r"(?:\d\s*(?:x|×)|(?:x|×)\s*\d|\d+\s*(?:pcs?|pieces?|cans?|bottles?|units?)\b|\b(?:pack|pk|case|carton|box|pcs?|pieces?|cans?|bottles?|units?|count|ct)\b|\d+\s*['’]s\b)",
     re.IGNORECASE,
@@ -116,6 +122,7 @@ class PackSizeService:
 
         invalid_existing = not blank(raw_pack)
         candidates: list[PackCandidate] = []
+        word_only: list[PackCandidate] = []
         has_hint = False
         for evidence_field, product_attribute in PACK_FIELDS:
             text = getattr(product, product_attribute)
@@ -127,11 +134,18 @@ class PackSizeService:
                     pack_size = _positive_whole(match.group("count"))
                     if pack_size is None:
                         continue
-                    candidates.append(PackCandidate(
+                    candidate = PackCandidate(
                         pack_size=pack_size,
                         evidence=Evidence(field=evidence_field, fragment=match.group(0)),
                         pattern_id=pattern_id,
-                    ))
+                    )
+                    if pattern_id in _WORD_PATTERNS and not _FOLLOWED_BY_SIZE.match(text, match.end()):
+                        word_only.append(candidate)
+                    else:
+                        candidates.append(candidate)
+        # Pack words corroborate or contradict a structure, but never stand alone.
+        if candidates:
+            candidates.extend(word_only)
 
         distinct = {candidate.pack_size for candidate in candidates}
         if len(distinct) == 1:
@@ -152,11 +166,14 @@ class PackSizeService:
                 invalid_existing=invalid_existing,
                 candidates=tuple(candidates),
             )
-        if has_hint:
+        if has_hint or word_only:
             return PackAssessment(
                 status=PackStatus.NEEDS_AGENT,
-                reason_code="PACK_PATTERN_AMBIGUOUS",
+                reason_code=(
+                    "PACK_WORD_WITHOUT_PIECE_SIZE" if word_only else "PACK_PATTERN_AMBIGUOUS"
+                ),
                 invalid_existing=invalid_existing,
+                candidates=tuple(word_only),
             )
         return PackAssessment(
             status=PackStatus.NOT_FOUND,
@@ -183,4 +200,8 @@ class PackSizeService:
             item_desc_local_lang=product.item_desc_local,
             web_description_eng=product.web_description_eng,
             web_description_chi=product.web_description_chi,
+            division=product.division,
+            category=product.category,
+            subcategory=product.subcategory,
+            section=product.section,
         )

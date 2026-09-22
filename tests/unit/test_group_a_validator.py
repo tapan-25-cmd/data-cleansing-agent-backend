@@ -276,3 +276,21 @@ def test_pack_count_conflict_does_not_reclassify_group_a():
 
     assert result.status == GroupAValidationStatus.VALID
     assert "BILINGUAL_DESCRIPTION_CONFLICT" not in issue_codes(result)
+
+
+def test_label_rounding_within_one_percent_is_not_a_mismatch():
+    # D4: 5 LB is 2268 GM; labels print 2.27 kg, so people entered 2270.
+    result = validator().validate(candidate(
+        legacy_size="5", legacy_uom="LB", standard_size="2270", standard_uom="GM",
+        raw_standard_size=2270, raw_standard_uom="GM",
+    ))
+    assert "ROUNDING_ONLY_VARIANCE" in issue_codes(result)
+    assert "SIGNIFICANT_LEGACY_SIZE_MISMATCH" not in issue_codes(result)
+
+
+def test_a_real_error_is_still_outside_the_tolerance():
+    result = validator().validate(candidate(
+        legacy_size="16", legacy_uom="OZ", standard_size="907", standard_uom="GM",
+        raw_standard_size=907, raw_standard_uom="GM",
+    ))
+    assert "SIGNIFICANT_LEGACY_SIZE_MISMATCH" in issue_codes(result)
