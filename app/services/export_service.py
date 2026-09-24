@@ -328,6 +328,44 @@ def _finding_comment(finding: dict[str, object], original: dict[str, object]) ->
             "match none of them. Confirm whether the size is per packet, per inner pack, "
             "or per case."
         )
+    if code == "LINKED_SIZE_AND_PACK_SUGGESTION" and current and expected:
+        proposed = dict(finding.get("proposed") or {})
+        suggestion = (
+            f"{_plain(proposed.get('standard_size'))} {proposed.get('standard_uom') or uom} × "
+            f"{_plain(proposed.get('standard_pack_size'))}"
+        )
+        return (
+            f"Excel says {current}. The legacy data ({legacy}) is the size of one pack and the "
+            f"description says “{expected}”: {suggestion} gives the same total. Suggested "
+            f"{suggestion}; confirm how the pack is sold."
+        )
+    if code == "DESCRIPTION_PACK_COUNT_DIFFERS" and current and expected:
+        return (
+            f"The description says “{expected}”, but Excel has a pack size of {current}. "
+            "Nothing was changed and nothing is suggested. Confirm which is current."
+        )
+    if code == "DESCRIPTION_CONFIRMS_PIECE_COUNT" and current and expected:
+        legacy_unit = str(original.get("legacy_uom") or "").strip().upper()
+        about_legacy = (
+            f"The legacy data ({legacy}) gives a weight or volume, not a piece count, "
+            "so it does not contradict this."
+            if _MEASURES.get(legacy_unit) or legacy_unit in {"GM", "G", "KG", "ML", "L", "LT"}
+            else f"The legacy data ({legacy}) is the package, not one piece."
+        )
+        return (
+            f"The description says “{expected}”, which matches Excel's {current}. "
+            f"{about_legacy} Nothing was changed."
+        )
+    if code == "DESCRIPTION_CONFIRMS_UNIT_SIZE" and current and expected:
+        return (
+            f"The description says “{expected}”, which matches Excel's {current}, so the "
+            f"legacy data ({legacy}) was not used to change it. Nothing was changed."
+        )
+    if code == "LEGACY_TOTAL_CONSISTENT" and current and expected:
+        return (
+            f"The legacy data ({expected}) is the whole pack: {current} = {expected}. "
+            "The values agree, so nothing was changed."
+        )
     if code == "ROUNDING_ONLY_VARIANCE":
         return (
             "The value agrees with the legacy data once label rounding is allowed. "
@@ -382,6 +420,10 @@ def _comment(item: dict[str, object]) -> str:
     if written:
         return " | ".join(written)
     return "Checked. The existing values passed every check."
+
+
+# The same wording is shown on screen when two runs are compared.
+row_comment = _comment
 
 
 def _audit_values(item: dict[str, object]) -> tuple[str, ...]:

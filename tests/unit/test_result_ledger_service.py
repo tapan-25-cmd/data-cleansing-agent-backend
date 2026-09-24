@@ -67,6 +67,21 @@ def test_rounding_variance_is_observation_only():
     assert result["changes"][0]["final"] == "375"
 
 
+def test_legacy_total_consistency_never_creates_a_k_only_proposal():
+    result = enrich_result_item(item(issues=[{
+        "code": "LEGACY_TOTAL_CONSISTENT",
+        "field": "standard_size",
+        "severity": "INFO",
+        "message": "Legacy matches K times M",
+        "current_value": "70 GM × 5",
+        "expected_value": "350 GM",
+    }]))
+
+    assert result["application_policy"] == "OBSERVATION_ONLY"
+    assert result["field_proposals"]["standard_size"] is None
+    assert result["changes"][0]["final"] == "375"
+
+
 def test_existing_rule_proposal_is_auto_apply():
     result = enrich_result_item(item(proposals={
         "standard_size": "1000",
@@ -188,3 +203,21 @@ def test_bilingual_measurement_conflict_is_not_reported_twice():
     source["discrepancy"] = discrepancy("CONFLICT", "VALUE_CONFLICT", aspect="MEASUREMENT")
     result = enrich_result_item(source)
     assert [f["code"] for f in result["findings"]] == ["BILINGUAL_DESCRIPTION_CONFLICT"]
+
+
+def test_linked_suggestion_proposes_size_and_pack_together_for_review():
+    result = enrich_result_item(item(issues=[{
+        "code": "LINKED_SIZE_AND_PACK_SUGGESTION",
+        "field": "standard_size",
+        "severity": "WARNING",
+        "message": "55 × 10 = 550",
+        "current_value": "550 GM × 1",
+        "expected_value": "\\10 (item description, English)",
+        "proposed": {"standard_size": "55", "standard_uom": "GM", "standard_pack_size": "10"},
+    }]))
+
+    assert result["application_policy"] == "REVIEW_REQUIRED"
+    assert result["field_proposals"] == {"standard_size": "55", "standard_uom": "GM", "standard_pack_size": "10"}
+    assert result["field_provenance"]["standard_pack_size"]["rule_id"] == "LEGACY_LINKED_PACK"
+    finding = next(f for f in result["findings"] if f["code"] == "LINKED_SIZE_AND_PACK_SUGGESTION")
+    assert finding["proposed"]["standard_pack_size"] == "10"

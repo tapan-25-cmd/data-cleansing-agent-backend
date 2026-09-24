@@ -1,5 +1,6 @@
 from pathlib import Path
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 from uuid import uuid4
 
@@ -54,6 +55,19 @@ def create_job(
     return {"job_id": job_id, "status": "UPLOADED"}
 
 
+def require_storage_headroom(repos: MongoRepositories) -> None:
+    headroom = repos.storage_headroom()
+    if headroom is None:
+        return
+    used_mb, limit_mb = headroom
+    if limit_mb - used_mb < MIN_FREE_MB:
+        raise HTTPException(
+            507,
+            f"The results database is full: {used_mb:.0f} MB of {limit_mb:.0f} MB used. "
+            "Delete workbooks you no longer need, or increase the database size, then try again.",
+        )
+
+
 @router.post("/{job_id}/process", status_code=status.HTTP_202_ACCEPTED)
 def process_job(
     job_id: str,
@@ -64,8 +78,13 @@ def process_job(
     job = repos.get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+    require_storage_headroom(repos)
+    job = mark_if_interrupted(job, repos)
     if job["status"] not in {"UPLOADED", "FAILED"}:
         raise HTTPException(409, f"Job cannot be processed from {job['status']}")
+    # A restart begins from the workbook again; rows written by the interrupted run
+    # would otherwise linger beside the new ones.
+    repos.delete_items(job_id)
     repos.update_job(job_id, {
         "status": "VALIDATING",
         "ruleset_version": service.registry.version,
@@ -76,11 +95,48 @@ def process_job(
     return {"job_id": job_id, "status": "VALIDATING"}
 
 
+# Progress is written every few seconds while a job runs. A job that has reported
+# nothing for this long is not running any more: the process that owned it was
+# restarted (for example a dev server reload) and the background task died with it.
+STALE_AFTER = timedelta(minutes=10)
+PROCESSING_STATUSES = frozenset({
+    "VALIDATING", "PROFILING", "PROCESSING", "PROCESSING_RULES",
+    "PROCESSING_DESCRIPTIONS", "CHECKING_DISCREPANCIES",
+})
+INTERRUPTED_MESSAGE = (
+    "Processing was interrupted before it finished: the server restarted or the database stopped "
+    "accepting writes while the job was running. Nothing was lost from your upload: press "
+    "Process again to run it from the start."
+)
+# A full run writes about 25 MB of results. Refuse to start one the database cannot hold,
+# rather than letting it stop at 97 percent when the cluster's quota blocks writes.
+MIN_FREE_MB = 40
+
+
+def mark_if_interrupted(job: dict, repos: MongoRepositories) -> dict:
+    """Turn a job that stopped reporting progress into a FAILED job the user can restart."""
+    if job.get("status") not in PROCESSING_STATUSES:
+        return job
+    updated = job.get("updated_at")
+    if updated is None:
+        return job
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - updated < STALE_AFTER:
+        return job
+    repos.update_job(job["job_id"], {
+        "status": "FAILED", "progress.stage": "FAILED", "error": INTERRUPTED_MESSAGE,
+    })
+    return {**job, "status": "FAILED", "error": INTERRUPTED_MESSAGE,
+            "progress": {**(job.get("progress") or {}), "stage": "FAILED"}}
+
+
 @router.get("/{job_id}")
 def get_job(job_id: str, repos: Annotated[MongoRepositories, Depends(repositories)]) -> dict:
     job = repos.get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+    job = mark_if_interrupted(job, repos)
     # A workbook built by an earlier exporter is offered for rebuilding rather than
     # handed over as-is, so a fix to the export reaches jobs already downloaded once.
     job["export_current"] = job.get("export_version") == EXPORT_VERSION

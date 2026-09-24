@@ -1,0 +1,49 @@
+version: reviewer-confirmed-v1
+# Answers a DFI reviewer (Eric) confirmed on 23 September 2026 for ten products
+# (docs/eric-review-klm-reconciliation-plan-v4.md). Each is the complete K/L/M the
+# reviewer accepts as right. "basis" says where the reviewer's answer comes from:
+#   TEXT      - the permitted product descriptions support it
+#   LEGACY    - the legacy I/J value supports it
+#   EXTERNAL  - the reviewer used the pack, an image or a website; the agent cannot
+#               read that, so the most it can do is keep the value and not fight it
+cases:
+  - item_no: "236638"
+    expected: {standard_size: "120", standard_uom: "GM", standard_pack_size: "50"}
+    answer: "120 GM × 50. The case size changed to 50; the description still says 25 × 120 GM."
+    basis: EXTERNAL
+  - item_no: "235812"
+    expected: {standard_size: "185", standard_uom: "GM", standard_pack_size: "16"}
+    answer: "185 GM × 16, as entered. The 3'S is the inner pack."
+    basis: TEXT
+  - item_no: "125773"
+    expected: {standard_size: "6", standard_uom: "EA", standard_pack_size: "1"}
+    answer: "6 EA × 1. Six candles in one pack; the legacy 1 PK is the package, not one candle."
+    basis: TEXT
+  - item_no: "006270"
+    expected: {standard_size: "50", standard_uom: "EA", standard_pack_size: "1"}
+    answer: "50 EA × 1. Fifty sachets in one pack."
+    basis: TEXT
+  - item_no: "550624"
+    expected: {standard_size: "55", standard_uom: "GM", standard_pack_size: "10"}
+    answer: "55 GM × 10. Ten noodle packs of 55 GM; the total 550 GM stays the same."
+    basis: TEXT
+  - item_no: "587501"
+    expected: {standard_size: "70", standard_uom: "GM", standard_pack_size: "5"}
+    answer: "70 GM × 5, as entered. The legacy 350 GM is the whole pack."
+    basis: LEGACY
+  - item_no: "389064"
+    expected: {standard_size: "116", standard_uom: "GM", standard_pack_size: "4"}
+    answer: "116 GM × 4, as entered. The legacy 464 GM is the whole pack."
+    basis: LEGACY
+  - item_no: "292979"
+    expected: {standard_size: "1", standard_uom: "EA", standard_pack_size: "6"}
+    answer: "1 EA × 6. Six cups in a value box; one cup is the consumption unit."
+    basis: TEXT
+  - item_no: "374470"
+    expected: {standard_size: "107", standard_uom: "GM", standard_pack_size: "1"}
+    answer: "107 GM × 1. The legacy 107 GM is right and Excel's 120 GM is wrong."
+    basis: EXTERNAL
+  - item_no: "016170"
+    expected: {standard_size: "63.4", standard_uom: "GM", standard_pack_size: "6"}
+    answer: "63.4 GM × 6, as entered. The legacy 380 GM is the whole pack, printed rounded."
+    basis: EXTERNAL

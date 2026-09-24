@@ -9,6 +9,7 @@ from uuid import uuid4
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from pydantic import ValidationError
 
 from app.agents.provider import (
     InferenceRequest,
@@ -41,6 +42,27 @@ def is_transient(error: BaseException) -> bool:
 def backoff_seconds(retry: int) -> float:
     ceiling = min(BACKOFF_CAP_SECONDS, BACKOFF_BASE_SECONDS * (2 ** retry))
     return random.uniform(ceiling / 2, ceiling)
+
+
+def is_output_schema_validation_error(error: BaseException) -> bool:
+    """ADK validates output_schema before yielding the final event.
+
+    Depending on the ADK layer, the Pydantic error may be raised directly or
+    wrapped on an `error`/cause attribute. Normalize only InferenceResult
+    validation failures; provider/network failures retain their own retry path.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ValidationError) and "InferenceResult" in str(current):
+            return True
+        wrapped = getattr(current, "error", None)
+        current = (
+            wrapped if isinstance(wrapped, BaseException)
+            else current.__cause__ or current.__context__
+        )
+    return False
 logger = logging.getLogger(__name__)
 
 
@@ -56,12 +78,14 @@ class AdkInferenceProvider:
         self.runner = Runner(app=bundle.app, session_service=self.session_service)
 
     async def infer(self, request: InferenceRequest) -> InferenceResponse:
-        last_invalid: InvalidInferenceResponseError | None = None
+        validation_errors: list[str] = []
         for attempt in range(1, 3):
             try:
-                return await self._infer_with_backoff(request, attempt)
+                return await self._infer_with_backoff(
+                    request, attempt, validation_errors=validation_errors,
+                )
             except InvalidInferenceResponseError as exc:
-                last_invalid = exc
+                validation_errors.append(str(exc))
                 _log_event(
                     "ai.invalid_response",
                     attempt=attempt,
@@ -69,13 +93,24 @@ class AdkInferenceProvider:
                     error=str(exc),
                 )
                 if attempt == 2:
-                    raise
-        raise last_invalid or InferenceProviderError("ADK inference failed")
+                    raise InvalidInferenceResponseError(
+                        "ADK returned invalid structured responses after schema-repair retry",
+                        validation_errors=validation_errors,
+                    ) from exc
+        raise InferenceProviderError("ADK inference failed")  # pragma: no cover
 
-    async def _infer_with_backoff(self, request: InferenceRequest, attempt: int) -> InferenceResponse:
+    async def _infer_with_backoff(
+        self,
+        request: InferenceRequest,
+        attempt: int,
+        *,
+        validation_errors: list[str],
+    ) -> InferenceResponse:
         for retry in range(MAX_TRANSIENT_RETRIES + 1):
             try:
-                return await self._infer_once(request, attempt + retry)
+                return await self._infer_once(
+                    request, attempt + retry, validation_errors=validation_errors,
+                )
             except InvalidInferenceResponseError:
                 raise
             except Exception as exc:
@@ -89,7 +124,13 @@ class AdkInferenceProvider:
                 await asyncio.sleep(delay)
         raise InferenceProviderError("ADK inference failed")  # pragma: no cover
 
-    async def _infer_once(self, request: InferenceRequest, attempt: int) -> InferenceResponse:
+    async def _infer_once(
+        self,
+        request: InferenceRequest,
+        attempt: int,
+        *,
+        validation_errors: list[str],
+    ) -> InferenceResponse:
         session_id = str(uuid4())
         started = perf_counter()
         await self.session_service.create_session(
@@ -98,9 +139,15 @@ class AdkInferenceProvider:
             session_id=session_id,
         )
         try:
+            retry_request = request
+            if validation_errors:
+                retry_request = request.model_copy(update={
+                    "repair_attempt": 2,
+                    "repair_validation_error": validation_errors[-1][:1000],
+                })
             content = types.Content(
                 role="user",
-                parts=[types.Part(text=request.model_dump_json(exclude_none=True))],
+                parts=[types.Part(text=retry_request.model_dump_json(exclude_none=True))],
             )
             final_text: str | None = None
             input_tokens = output_tokens = 0
@@ -154,12 +201,19 @@ class AdkInferenceProvider:
                     session_id=session_id,
                     input_tokens=input_tokens or None,
                     output_tokens=output_tokens or None,
+                    validation_errors=list(validation_errors),
                 ),
             )
         except TimeoutError as exc:
             raise InferenceProviderError(
                 f"ADK inference exceeded {self.timeout_seconds:g} seconds"
             ) from exc
+        except Exception as exc:
+            if is_output_schema_validation_error(exc):
+                raise InvalidInferenceResponseError(
+                    f"ADK output failed InferenceResult validation: {exc}"
+                ) from exc
+            raise
         finally:
             try:
                 await self.session_service.delete_session(

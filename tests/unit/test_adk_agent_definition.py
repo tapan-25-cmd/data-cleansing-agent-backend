@@ -27,7 +27,7 @@ def test_prompt_states_the_contract_the_backend_enforces():
     """Wording is judged by the evaluation harness; this guards the contract itself."""
     prompt, checksum = load_prompt()
     assert len(checksum) == 64
-    assert PROMPT_VERSION == "uom-inference-v3"
+    assert PROMPT_VERSION == "uom-inference-v4.3"
     # ADK treats {name} in an instruction as a state template.
     assert "{" not in prompt and "}" not in prompt
     for role in ("NET_CONTENT_UNIT", "NET_CONTENT_TOTAL", "CAPACITY_OR_RANGE", "DIMENSION",
@@ -38,6 +38,8 @@ def test_prompt_states_the_contract_the_backend_enforces():
         assert rule in prompt, rule
     for unit in ("克", "毫升", "公升", "安士", "孖裝", "原箱"):
         assert unit in prompt, unit
+    for concept in ("pair_interpretations", "quantity_relationships", "Silence is not conflict"):
+        assert concept in prompt, concept
 
 
 def test_output_schema_uses_gemini_compatible_keywords():

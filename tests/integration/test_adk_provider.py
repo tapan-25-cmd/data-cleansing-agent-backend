@@ -4,7 +4,7 @@ import pytest
 from google.genai import types
 
 from app.agents.adk_provider import AdkInferenceProvider
-from app.agents.provider import InferenceRequest
+from app.agents.provider import InferenceRequest, InvalidInferenceResponseError
 from app.agents.uom_inference_agent import build_uom_agent
 from app.config import Settings
 
@@ -181,7 +181,7 @@ async def test_rate_limits_are_retried_with_backoff_and_tokens_are_recorded(monk
     assert response.result.reason_code == "NOT_IN_DESCRIPTION"  # derived, not supplied
     assert response.result.other_measurements[0].role == "CAPACITY_OR_RANGE"
     assert (response.metadata.input_tokens, response.metadata.output_tokens) == (1200, 45)
-    assert response.metadata.prompt_version == "uom-inference-v3"
+    assert response.metadata.prompt_version == "uom-inference-v4.3"
     # Sessions are cleaned up even for the failed attempts.
     assert len(provider.session_service.created) == len(provider.session_service.deleted) == 3
 
@@ -203,11 +203,81 @@ async def test_a_non_transient_failure_is_not_retried():
     assert BrokenRunner.calls == 1
 
 
+class RepairableRunner:
+    def __init__(self):
+        self.prompts = []
+
+    async def run_async(self, **values):
+        prompt = values["new_message"].parts[0].text
+        self.prompts.append(prompt)
+        fragment = "2 KG" if len(self.prompts) == 1 else "1 KG"
+        yield FinalEvent({
+            "status": "PROPOSAL",
+            "measurement": {
+                "value": "1", "uom": "KG", "field": "item_desc_eng",
+                "fragment": fragment,
+            },
+        })
+
+
+@pytest.mark.asyncio
+async def test_invalid_structured_answer_gets_one_explicit_repair_retry():
+    runner = RepairableRunner()
+    provider = adk_provider(runner)
+
+    response = await provider.infer(InferenceRequest(item_desc_eng="FLOUR 1 KG"))
+
+    assert response.result.measurement.fragment == "1 KG"
+    assert response.metadata.attempt_count == 2
+    assert len(response.metadata.validation_errors) == 1
+    assert "evidence fragment is absent" in response.metadata.validation_errors[0]
+    first_request = json.loads(runner.prompts[0])
+    repair_request = json.loads(runner.prompts[1])
+    assert "repair_attempt" not in first_request
+    assert repair_request["repair_attempt"] == 2
+    assert "evidence fragment is absent" in repair_request["repair_validation_error"]
+
+
+class AlwaysInvalidRunner:
+    async def run_async(self, **values):
+        yield FinalEvent({
+            "status": "PROPOSAL",
+            "measurement": {
+                "value": "1", "uom": "KG", "field": "item_desc_eng",
+                "fragment": "missing",
+            },
+        })
+
+
+@pytest.mark.asyncio
+async def test_two_invalid_answers_expose_both_validation_attempts():
+    provider = adk_provider(AlwaysInvalidRunner())
+
+    with pytest.raises(InvalidInferenceResponseError) as raised:
+        await provider.infer(InferenceRequest(item_desc_eng="FLOUR 1 KG"))
+
+    assert len(raised.value.validation_errors) == 2
+    assert all("evidence fragment is absent" in error for error in raised.value.validation_errors)
+
+
 def test_transient_errors_are_recognised_and_backoff_is_capped():
-    from app.agents.adk_provider import BACKOFF_CAP_SECONDS, backoff_seconds, is_transient
+    from app.agents.adk_provider import (
+        BACKOFF_CAP_SECONDS,
+        backoff_seconds,
+        is_output_schema_validation_error,
+        is_transient,
+    )
+    from app.agents.provider import InferenceResult
     assert is_transient(RateLimited("x")) and is_transient(RuntimeError("503 UNAVAILABLE"))
     assert not is_transient(ValueError("bad schema"))
     assert all(backoff_seconds(retry) <= BACKOFF_CAP_SECONDS for retry in range(12))
+    try:
+        InferenceResult.model_validate({
+            "status": "NOT_IN_DESCRIPTION",
+            "reason_code": "EXPLICIT_PACK_COUNT",
+        })
+    except ValueError as exc:
+        assert is_output_schema_validation_error(exc)
 
 
 def test_evidence_may_never_be_cited_from_category_context():

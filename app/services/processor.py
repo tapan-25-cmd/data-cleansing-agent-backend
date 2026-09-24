@@ -538,24 +538,27 @@ class JobProcessor:
             "uncovered_source_uoms": uncovered,
             "uncovered_affected_rows": sum(source_counts[source] for source in uncovered),
         }
+        validation_policy = {
+            "version": GROUP_A_VALIDATION_VERSION,
+            "alias_version": STANDARD_UOM_ALIAS_VERSION,
+            "alias_checksum": STANDARD_UOM_ALIAS_CHECKSUM,
+            "group_b_rounding": "EXCEL_NEAREST_WHOLE",
+            "pack_extraction_version": PACK_EXTRACTION_VERSION,
+            "discrepancy_engine_version": DISCREPANCY_ENGINE_VERSION,
+            "guards_version": guards.GUARDS_VERSION,
+            "category_profile": profile.as_dict(),
+            "packaging_expression_version": PACKAGING_EXPRESSION_VERSION,
+            "pack_agent_fallback_enabled": self.pack_size_inference_enabled,
+        }
         self.repositories.update_job(job_id, {
             "status": "READY_FOR_REVIEW",
             "stats": stats,
-            "validation_policy": {
-                "version": GROUP_A_VALIDATION_VERSION,
-                "alias_version": STANDARD_UOM_ALIAS_VERSION,
-                "alias_checksum": STANDARD_UOM_ALIAS_CHECKSUM,
-                "group_b_rounding": "EXCEL_NEAREST_WHOLE",
-                "pack_extraction_version": PACK_EXTRACTION_VERSION,
-                "discrepancy_engine_version": DISCREPANCY_ENGINE_VERSION,
-                "guards_version": guards.GUARDS_VERSION,
-                "category_profile": profile.as_dict(),
-                "packaging_expression_version": PACKAGING_EXPRESSION_VERSION,
-                "pack_agent_fallback_enabled": self.pack_size_inference_enabled,
-            },
+            "validation_policy": validation_policy,
             "rule_readiness": readiness,
             "ai_usage": dict(self.ai_usage),
-            "quality": self.quality_service.build_report(job, items),
+            "quality": self.quality_service.build_report(
+                {**job, "validation_policy": validation_policy}, items,
+            ),
             "progress": {
                 "stage": "READY_FOR_REVIEW", "processed": stats["live"],
                 "total": stats["live"], "unit": "ROWS", "percent": 100,
@@ -739,6 +742,11 @@ class JobProcessor:
                 item["pack_result"]["status"] = "AGENT_ERROR"
                 item["pack_result"]["reason_code"] = "PACK_AGENT_ERROR"
                 item["pack_result"]["error"] = f"{type(exc).__name__}: {exc}"
+                if isinstance(exc, InvalidInferenceResponseError):
+                    item["pack_result"]["validation_attempts"] = [
+                        {"attempt": attempt, "error": error}
+                        for attempt, error in enumerate(exc.validation_errors, start=1)
+                    ]
                 _log_event(
                     "item.pack_inference_failed",
                     job_id=item["job_id"],
@@ -910,6 +918,10 @@ class JobProcessor:
             except InvalidInferenceResponseError as exc:
                 items[index]["reason_code"] = "AI_INVALID_RESPONSE"
                 items[index]["ai_error"] = str(exc)
+                items[index]["ai_attempts"] = [
+                    {"attempt": attempt, "error": error}
+                    for attempt, error in enumerate(exc.validation_errors, start=1)
+                ]
                 if (items[index].get("pack_result") or {}).get("status") in {
                     PackStatus.NEEDS_AGENT.value, PackStatus.NOT_FOUND.value,
                 }:

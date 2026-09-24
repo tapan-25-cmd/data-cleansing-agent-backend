@@ -6,7 +6,7 @@ from typing import Any
 from app.services.guards import GUARD_REVIEW_CODES
 
 
-RESULT_LEDGER_VERSION = "result-ledger-v2"
+RESULT_LEDGER_VERSION = "result-ledger-v4"
 AUDIT_FIELDS = ("standard_size", "standard_uom", "standard_pack_size")
 
 _FINDING_METADATA = {
@@ -24,6 +24,31 @@ _FINDING_METADATA = {
         "VALIDATION",
         "INFO",
         "Could not be double-checked against the legacy data",
+    ),
+    "LINKED_SIZE_AND_PACK_SUGGESTION": (
+        "SOURCE_DISCREPANCY",
+        "REVIEW",
+        "Legacy size and description count together match Excel's total; suggested as one change",
+    ),
+    "DESCRIPTION_PACK_COUNT_DIFFERS": (
+        "SOURCE_DISCREPANCY",
+        "REVIEW",
+        "The description's count differs from Excel's pack size",
+    ),
+    "DESCRIPTION_CONFIRMS_PIECE_COUNT": (
+        "SOURCE_AGREEMENT",
+        "INFO",
+        "The description confirms the piece count Excel already has",
+    ),
+    "DESCRIPTION_CONFIRMS_UNIT_SIZE": (
+        "SOURCE_AGREEMENT",
+        "INFO",
+        "The description confirms the size Excel already has",
+    ),
+    "LEGACY_TOTAL_CONSISTENT": (
+        "PACKAGING_HIERARCHY",
+        "INFO",
+        "Legacy value agrees with the existing whole-pack total",
     ),
     "LEGACY_UOM_MISMATCH": (
         "SOURCE_DISCREPANCY",
@@ -124,6 +149,8 @@ _FINDING_METADATA = {
 
 REVIEW_CODES = GUARD_REVIEW_CODES | frozenset({
     "SIGNIFICANT_LEGACY_SIZE_MISMATCH",
+    "LINKED_SIZE_AND_PACK_SUGGESTION",
+    "DESCRIPTION_PACK_COUNT_DIFFERS",
     "LEGACY_UOM_MISMATCH",
     "PACKAGING_HIERARCHY_AMBIGUOUS",
     "BILINGUAL_DESCRIPTION_CONFLICT",
@@ -213,6 +240,7 @@ def _finding(issue: dict[str, Any]) -> dict[str, Any]:
         evidence.append({"role": "EXPECTED", "value": expected})
     return {
         "code": code,
+        "proposed": dict(issue["proposed"]) if issue.get("proposed") else None,
         "category": category,
         "severity": severity,
         "title": title,
@@ -244,7 +272,21 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
         if issue.get("code") == "SIGNIFICANT_LEGACY_SIZE_MISMATCH"
         and issue.get("expected_value") is not None
     ), None)
-    if mismatch and proposals.get("standard_size") is None:
+    linked = next((
+        issue for issue in issues
+        if issue.get("code") == "LINKED_SIZE_AND_PACK_SUGGESTION" and issue.get("proposed")
+    ), None)
+    if linked and proposals.get("standard_size") is None:
+        # Size and pack are one suggestion: approving one without the other would
+        # change the total, which is exactly what this suggestion preserves.
+        for field, value in dict(linked["proposed"]).items():
+            proposals[field] = value
+            item.setdefault("field_provenance", {})[field] = {
+                "method": "RULE",
+                "rule_id": "LEGACY_LINKED_PACK",
+                "policy_version": RESULT_LEDGER_VERSION,
+            }
+    elif mismatch and proposals.get("standard_size") is None:
         proposals["standard_size"] = mismatch["expected_value"]
         if original.get("standard_uom") is not None:
             proposals["standard_uom"] = original["standard_uom"]

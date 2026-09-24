@@ -338,7 +338,7 @@ def test_safety_checks_and_engine_are_reported_in_plain_language():
     assert first["example"].startswith("1 (") and "266 ML" in first["example"]
     engine = report["engine"]
     assert (engine["prompt_version"], engine["ruleset_version"], engine["processed_with_guards"]) == (
-        "uom-inference-v3", "poc-v3", True,
+            "uom-inference-v4.3", "poc-v3", True,
     )
     assert engine["ai_test_is_current"] is False  # measured with v2 instructions
     old_job = service().build_report({}, [item("3")])

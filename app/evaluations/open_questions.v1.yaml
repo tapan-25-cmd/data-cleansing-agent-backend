@@ -1,0 +1,258 @@
+version: open-questions-v1
+# Every row that is not simply "already correct" is placed in exactly one category.
+# Categories are tried in this order; the first whose `codes` (finding codes) match wins.
+# `status` / `uom` narrow a match. `kind` says what the reader is looking at:
+#   REVIEW   a person must decide      NOTE   nothing changed, the rule is explained
+#   AUTO     changed automatically     BLANK  left blank on purpose
+groups:
+  - id: legacy_vs_excel
+    title: Legacy value and Excel disagree
+  - id: pack_structure
+    title: Pack structure doubts
+  - id: conversion
+    title: Conversion doubts
+  - id: ai_reading
+    title: What the AI read
+  - id: notes
+    title: Notes to confirm
+  - id: automatic
+    title: Changed automatically
+categories:
+  - id: same_total_different_split
+    group: pack_structure
+    kind: REVIEW
+    name: Same total, different split
+    codes: [LINKED_SIZE_AND_PACK_SUGGESTION]
+    rule: >-
+      The legacy size multiplied by a count written in the description equals the total Excel
+      already has. The engine suggests size and pack together so the total never changes.
+    question: Is each inner pack a unit that is sold or consumed on its own? If yes, the split
+      goes into unit size × pack size. If the whole item is the unit, Excel stays as it is.
+    options: [Use the split (size × count), Keep Excel as one unit, Decide product by product]
+  - id: description_pack_count_differs
+    group: pack_structure
+    kind: REVIEW
+    name: Description count differs from Excel pack size
+    codes: [DESCRIPTION_PACK_COUNT_DIFFERS]
+    rule: >-
+      The description states Excel's unit size next to a count that is not Excel's pack size,
+      for example "CASE 25 X 120GM" against a pack size of 50. Nothing says which is current.
+    question: When the description and Excel disagree on the count, which one is current, and
+      who confirms it?
+    options: [Excel is newer, keep it, The description is right, correct Excel, Decide product by product]
+  - id: package_wording_two_ways
+    group: pack_structure
+    kind: REVIEW
+    name: Package wording can be read two ways
+    codes: [PACKAGING_HIERARCHY_AMBIGUOUS]
+    rule: >-
+      The package wording supports more than one unit size and pack size, and Excel matches
+      none of them, for example "5 CASE/10X90GM".
+    question: For case packs, is the unit the piece, the inner pack or the case?
+    options: [The piece, The inner pack, The case, Decide product by product]
+  - id: languages_disagree
+    group: pack_structure
+    kind: REVIEW
+    name: English and Chinese descriptions disagree
+    codes: [BILINGUAL_DESCRIPTION_CONFLICT, PACK_COUNT_CONFLICT]
+    rule: >-
+      The English and the Chinese text of the same field state a different size or count.
+      The engine never picks a side.
+    question: Which language is maintained first, and can the other be corrected from it?
+    options: [English is the master, Chinese is the master, Decide product by product]
+  - id: legacy_different_unit_kind
+    group: legacy_vs_excel
+    kind: REVIEW
+    name: Legacy measured in a different kind of unit
+    codes: [LEGACY_UOM_MISMATCH]
+    rule: >-
+      The legacy value is a volume where Excel has a weight, or the other way round, for
+      example legacy 100 ML against Excel 100 GM. They cannot be compared without knowing
+      the product.
+    question: Which kind of unit does the business standardise on for these products, weight
+      or volume?
+    options: [Keep the Excel unit, Use the legacy unit, Decide by product category]
+  - id: legacy_counts_differently
+    group: legacy_vs_excel
+    kind: REVIEW
+    name: Legacy counts pieces differently
+    codes: [SIGNIFICANT_LEGACY_SIZE_MISMATCH]
+    uom: EA
+    rule: >-
+      Both the legacy and Excel count pieces, but the numbers differ and the description does
+      not settle it, for example legacy 10 PC against Excel 1 EA × 6.
+    question: Does the legacy count the pieces or the packs?
+    options: [Legacy counts pieces, Legacy counts packs, Decide product by product]
+  - id: legacy_different_size
+    group: legacy_vs_excel
+    kind: REVIEW
+    name: Different size, same kind of unit
+    codes: [SIGNIFICANT_LEGACY_SIZE_MISMATCH]
+    rule: >-
+      The legacy value converts to a size that is neither Excel's unit size nor its whole
+      pack, beyond the rounding allowance, for example legacy 12.3 OZ = 349 GM against 375 GM.
+    question: When the legacy size and the Excel size disagree, which one is right?
+    options: [The legacy size, correct Excel, The Excel size, ignore the legacy, Decide product by product]
+  - id: ounce_weight_or_fluid
+    group: conversion
+    kind: REVIEW
+    name: Ounce could be weight or fluid
+    codes: [OUNCE_MAY_BE_FLUID]
+    rule: >-
+      The legacy unit is OZ. For a liquid that is a fluid ounce (29.57 ML), for a solid a
+      weight ounce (28.35 GM). The product's category does not say which.
+    question: For these categories, is OZ a fluid ounce?
+    options: [Fluid ounce, Weight ounce, Decide by category]
+  - id: text_contradicts_conversion
+    group: conversion
+    kind: REVIEW
+    name: Description contradicts the converted value
+    codes: [TEXT_CONTRADICTS_RESULT]
+    rule: >-
+      The legacy value was converted by rule, but the description states a different size.
+    question: Which is right, the legacy value or the description?
+    options: [The description, The legacy value, Decide product by product]
+  - id: ai_reading_held
+    group: ai_reading
+    kind: REVIEW
+    name: AI reading held back by a safety check
+    codes: [SIZE_OUTSIDE_CATEGORY_RANGE, AI_MEASUREMENT_NOT_PRODUCT_SIZE, LEGACY_MAY_BE_PACK_TOTAL]
+    rule: >-
+      The AI found a value, but a safety check stopped it: the size is far outside what this
+      category usually has, or the number describes a container or a whole pack.
+    question: Confirm the reading or the safety check for these products.
+    options: [The AI reading is right, The safety check is right, Decide product by product]
+  - id: ai_pack_needs_confirmation
+    group: ai_reading
+    kind: REVIEW
+    name: AI read a pack size that needs confirmation
+    codes: [AI_PACK_NEEDS_CONFIRMATION]
+    rule: >-
+      The AI read a piece count such as "12PCS". A piece count can be the pack being sold or
+      what is inside it (a gift box, a voucher), so a person confirms it before it is used.
+    question: For these products, is the count the sellable pack or the contents?
+    options: [Sellable pack, use it, Contents, do not use it, Decide product by product]
+  - id: description_size_differs
+    group: legacy_vs_excel
+    kind: REVIEW
+    name: Description states a different size than Excel
+    codes: [DESCRIPTION_MEASUREMENT_MISMATCH]
+    status: REVIEW_REQUIRED
+    rule: >-
+      The description states a size that matches neither Excel's unit size nor its whole pack.
+    question: Which is right, the description or Excel?
+    options: [The description, Excel, Decide product by product]
+  - id: other_review
+    group: legacy_vs_excel
+    kind: REVIEW
+    name: Other review
+    status: REVIEW_REQUIRED
+    rule: A review raised by a check not listed above.
+    question: See the finding on each row.
+    options: []
+  - id: unknown_legacy_unit
+    group: conversion
+    kind: BLANK
+    name: Legacy unit not in the conversion table
+    codes: [UNMAPPED_SOURCE_UOM, LEGACY_NOT_COMPARABLE]
+    rule: >-
+      The legacy unit has no agreed conversion, for example ST. Where Excel already had a
+      value it was kept with a note; where it was blank it was left blank rather than guessed.
+    question: What do these units mean, and how should they convert?
+    options: [Add a conversion for each unit, Leave these blank]
+  - id: nothing_in_description
+    group: ai_reading
+    kind: BLANK
+    name: Nothing found in the descriptions
+    codes: [AGENT_NO_EXPLICIT_EVIDENCE, AGENT_PROCESSING_ERROR]
+    rule: >-
+      No size or count is written in any of the six description fields and there is no legacy
+      value. The AI reports nothing rather than guessing.
+    question: Where does the size for these products come from?
+    options: [Another data source, Manual entry, Leave blank]
+  - id: legacy_is_whole_pack
+    group: notes
+    kind: NOTE
+    name: Legacy value is the whole pack
+    codes: [LEGACY_TOTAL_CONSISTENT]
+    rule: >-
+      The legacy value equals Excel's unit size × pack size, so it describes the whole pack,
+      not one piece. Excel is kept; the old suggestion to replace the unit size is gone.
+    question: Confirm that a legacy value equal to the whole pack confirms Excel.
+    options: [Confirmed, Not confirmed]
+  - id: rounding_allowance
+    group: notes
+    kind: NOTE
+    name: Rounding within the allowance
+    codes: [ROUNDING_ONLY_VARIANCE]
+    rule: >-
+      The converted legacy value differs from Excel by at most 1 unit or 1 percent, the normal
+      effect of label rounding, for example 17.1 OZ = 485 GM against 484 GM.
+    question: Confirm the allowance of 1 unit or 1 percent.
+    options: [Confirmed, Use a different allowance]
+  - id: description_confirms_excel
+    group: notes
+    kind: NOTE
+    name: Description confirms Excel
+    codes: [DESCRIPTION_CONFIRMS_PIECE_COUNT, DESCRIPTION_CONFIRMS_UNIT_SIZE]
+    rule: >-
+      The legacy value looked different, but the description states exactly what Excel has,
+      for example "彩色長蠟燭6枝" for 6 EA × 1 where the legacy 1 PK is the package.
+    question: Confirm that a description stating Excel's value settles a legacy difference.
+    options: [Confirmed, Not confirmed]
+  - id: number_not_a_size
+    group: notes
+    kind: NOTE
+    name: Number in the description is not a size
+    codes: [DESCRIPTION_MEASUREMENT_MISMATCH]
+    rule: >-
+      The description contains a number with a unit that does not match Excel, but Excel was
+      kept because the legacy agrees with it, for example "VINEGAR 3G" where 3G is a grade.
+    question: Confirm these numbers are names or grades, not sizes.
+    options: [Confirmed, Some are sizes]
+  - id: other_note
+    group: notes
+    kind: NOTE
+    name: Other note
+    status: OBSERVATION_ONLY
+    rule: A note from a check not listed above.
+    question: See the finding on each row.
+    options: []
+  - id: converted_by_rule
+    group: automatic
+    kind: AUTO
+    name: Converted from the legacy value by rule
+    reason: RULE_CONVERSION
+    rule: >-
+      Excel was blank. The legacy value was converted with the agreed conversion table and
+      rounded to a whole number, for example 12 OZ becomes 340 GM.
+    question: Confirm the conversion table and whole-number rounding.
+    options: [Confirmed, Change a factor]
+  - id: format_fixed
+    group: automatic
+    kind: AUTO
+    name: Spelling or format fixed
+    reason: STANDARD_FIELDS_NORMALIZATION
+    rule: >-
+      The value was already there but written differently, for example "ml" or a number stored
+      as text. Only the spelling or format was changed.
+    question: None. Listed so every change is visible.
+    options: []
+  - id: read_from_description
+    group: automatic
+    kind: AUTO
+    name: Read from the description by the AI
+    status: AUTO_APPLY
+    rule: >-
+      Excel was blank and no legacy value existed. The AI found the size written in the
+      description and it passed every safety check.
+    question: Confirm the AI may fill these in automatically.
+    options: [Confirmed, Send them to review instead]
+  - id: other_automatic
+    group: automatic
+    kind: AUTO
+    name: Other automatic change
+    status: AUTO_APPLY
+    rule: A change from a rule not listed above.
+    question: None.
+    options: []

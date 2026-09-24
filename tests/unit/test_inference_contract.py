@@ -1,7 +1,15 @@
 import pytest
 from pydantic import ValidationError
 
-from app.agents.provider import Evidence, InferenceRequest, InferenceResult, ObservedMeasurement, validate_evidence
+from app.agents.provider import (
+    Evidence,
+    InferenceRequest,
+    InferenceResult,
+    ObservedMeasurement,
+    PairInterpretation,
+    QuantityRelationship,
+    validate_evidence,
+)
 
 
 def test_inference_request_forbids_answer_fields():
@@ -113,3 +121,38 @@ def test_pack_only_request_rejects_measurement_response():
     )
     with pytest.raises(ValueError, match="PACK_ONLY"):
         validate_evidence(request, result)
+
+
+def test_pair_interpretation_can_use_one_language_when_partner_is_silent():
+    request = InferenceRequest(
+        item_desc_eng="BIRTHDAY CANDLES",
+        item_desc_local_lang="生日蠟燭13支",
+    )
+    result = InferenceResult(
+        status="NOT_IN_DESCRIPTION",
+        pack_size=13,
+        pack_evidence=Evidence(field="item_desc_local_lang", fragment="13支"),
+        pack_role="CONTENTS",
+        pair_interpretations=[PairInterpretation(
+            pair="ITEM_DESCRIPTION",
+            status="SUPPORTED",
+            product_meaning="Thirteen birthday candles",
+            evidence=[Evidence(field="item_desc_local_lang", fragment="13支")],
+            conclusion="The local description states thirteen candles; English is silent on count.",
+        )],
+        quantity_relationships=[QuantityRelationship(
+            relationship="CONTAINS",
+            subject="birthday candles",
+            count=13,
+            evidence=[Evidence(field="item_desc_local_lang", fragment="13支")],
+        )],
+    )
+
+    validate_evidence(request, result)
+
+
+def test_relationship_requires_literal_evidence():
+    with pytest.raises(ValidationError, match="literal evidence"):
+        QuantityRelationship(
+            relationship="UNITS_PER_PACK", subject="cakes", count=6,
+        )

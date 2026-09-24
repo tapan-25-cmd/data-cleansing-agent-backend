@@ -1,0 +1,516 @@
+version: rules-guide-v1
+# Plain-language description of what the engine does, in the order it runs.
+flow:
+  - step: 1
+    title: Skip empty products
+    text: A purged product with no details is skipped. Nothing is read or changed.
+    tab: flow
+  - step: 2
+    title: Put the product in a lane
+    text: >-
+      Lane A: all three values (unit size, unit, pack size) are already filled in, so they are only
+      checked. Lane B: they are missing but a legacy value exists, so they are filled in from it.
+      Lane C: nothing usable exists, so the descriptions are read.
+    tab: flow
+  - step: 3
+    title: Lane B, convert the legacy value
+    text: >-
+      The legacy value is converted with the unit mapping table and rounded to a whole number the
+      way Excel rounds. A unit that is not in the table is left blank and marked "could not determine".
+    tab: unit_mapping
+  - step: 4
+    title: Lane C, read the descriptions
+    text: >-
+      The AI reads the six description fields and may only report a size or count that is literally
+      written there. It never sees the legacy value or the Excel values. Its answer then passes the
+      safety checks.
+    tab: ai_rules
+  - step: 5
+    title: Lane A, check the existing values against the legacy value
+    text: >-
+      The legacy value is compared with the three Excel values. The first line below that fits
+      decides the row.
+    steps:
+      - "Legacy equals Excel's unit size → Already correct."
+      - "Legacy equals unit size × pack size, so it is the whole pack → Correct, with a note."
+      - "Legacy is within 1 unit or 1 percent of either → Correct, with a note (label rounding)."
+      - "Legacy differs, but the description states exactly what Excel has → Correct, with a note."
+      - "Legacy size × a count in the description equals Excel's total → Needs review; size and pack suggested together."
+      - "Legacy is a weight where Excel is a volume, or the reverse → Needs review."
+      - "Legacy differs and nothing explains it → Needs review; the converted legacy value is suggested."
+    tab: legacy_checks
+  - step: 6
+    title: Lane A, check the existing values against the descriptions
+    text: >-
+      The English and Chinese text of each field are compared with each other and with Excel. A
+      different size, or a count that differs from the pack size, goes to a person.
+    tab: description_reading
+  - step: 7
+    title: Give the row one label
+    text: >-
+      Already correct, Corrected automatically, Correct with a note, Needs your review, Could not
+      determine, Skipped.
+    tab: flow
+  - step: 8
+    title: People decide, then download
+    text: >-
+      Every review row offers keep Excel, use the suggestion, or enter values. The workbook is not
+      changed until a person decides. The download carries the final values, a colour per label and
+      a comment on every row.
+    tab: flow
+legacy_checks:
+  - order: 1
+    outcome: Same value
+    rule: The legacy value converts to exactly Excel's unit size.
+    result: Already correct
+    example: legacy 500 ML, Excel 500 ML × 1
+  - order: 2
+    outcome: Legacy is the whole pack
+    rule: The legacy value equals unit size × pack size.
+    result: Correct, with a note
+    example: legacy 350 GM, Excel 70 GM × 5
+  - order: 3
+    outcome: Rounding within the allowance
+    rule: The legacy value is within 1 unit or 1 percent of the unit size or of the whole pack.
+    result: Correct, with a note
+    example: legacy 17.1 OZ = 485 GM, Excel 484 GM; legacy 380 GM, Excel 63.4 GM × 6 = 380.4 GM
+  - order: 4
+    outcome: Description confirms Excel
+    rule: >-
+      The description states the piece count or the size Excel has, and the legacy is one package
+      or a weight per piece.
+    result: Correct, with a note
+    example: legacy 1 PK, Excel 6 EA × 1, description 彩色長蠟燭6枝
+  - order: 5
+    outcome: Same total, different split
+    rule: >-
+      The legacy size × a count in the description equals Excel's total. Size and pack are suggested
+      together; the total does not change.
+    result: Needs your review
+    example: legacy 55 GM, Excel 550 GM × 1, description NDL\10, suggested 55 GM × 10
+  - order: 6
+    outcome: Different kind of unit
+    rule: The legacy is a volume where Excel has a weight, or the reverse.
+    result: Needs your review
+    example: legacy 100 ML, Excel 100 GM
+  - order: 7
+    outcome: Real difference
+    rule: None of the above explains the difference. The converted legacy value is suggested.
+    result: Needs your review
+    example: legacy 12.3 OZ = 349 GM, Excel 375 GM
+not_a_size:
+  - A number on an empty container, tool, mould or appliance is its capacity, not product contents (1L MICROWAVE BOX, 5OZ PUDDING CUP).
+  - A number that the other language renders as a word is a name or grade (4L VINEGAR ↔ 四葉, 3.3G YOGHURT ↔ 3.3乳酪).
+  - A weight on a liquid or a volume on a solid is a grade or recipe code (VINEGAR5G).
+  - A year, model number, age or charge code is never a size or a count (CHATEAU MUSAR 2005, CHG-10).
+  - Two sizes joined together do not give one unit size (200ML+15ML).
+  - A count in brackets with no size is what is inside, not a pack to sell (TORTILLA (8 PACK)).
+  - A dimension is not a size (9CM TART RING).
+ai_rules:
+  - The AI only ever sees the six description fields and the product's category as context. It never sees the legacy value or the Excel values.
+  - Every value it reports must be quoted word for word from one of those fields.
+  - It reports what each number means (amount in one piece, total of the pack, capacity, dimension, name or grade) and the engine decides what to use.
+  - English and Chinese in the same field are read together; if one is silent that is not a conflict. If they contradict each other, no side is chosen.
+  - It never converts units, never multiplies, never guesses a typical size, never browses.
+  - A pack count it reads is always confirmed by a person before it is used.
+  - Every new version of its instructions must pass all thirty hard cases with no confident wrong answer before it is used.
+guards:
+  - code: OUNCE_MAY_BE_FLUID
+    meaning: The legacy unit is OZ and the category may be a liquid, so weight ounce and fluid ounce both apply. A person decides.
+  - code: TEXT_CONTRADICTS_RESULT
+    meaning: The description states a different size than the value about to be written.
+  - code: SIZE_OUTSIDE_CATEGORY_RANGE
+    meaning: The value is far outside what products in this category usually have.
+  - code: AI_MEASUREMENT_NOT_PRODUCT_SIZE
+    meaning: The AI read a number that describes a container, a dimension or a name, not the product contents.
+  - code: LEGACY_MAY_BE_PACK_TOTAL
+    meaning: The description shows the legacy value is the whole pack, so it must not become the unit size.
+  - code: AI_PACK_NEEDS_CONFIRMATION
+    meaning: A piece count read by the AI can be the pack sold or the contents. A person confirms it.
+  - code: COUNT_IN_MEASURED_CATEGORY
+    meaning: Note only. The legacy gives a count where most products in the category carry a weight or volume.
+decisions:
+  - id: D1
+    title: What unit size and pack size mean
+    text: Unit size is one piece; pack size is the number of pieces; the sellable item is size × pack.
+  - id: D2
+    title: Ounces
+    text: OZ is a US fluid ounce for liquids and a weight ounce otherwise. Liquid categories are learned from the workbook itself.
+  - id: D3
+    title: What the AI may see
+    text: The product category as context, never as evidence. Excel columns B and C are never used.
+  - id: D4
+    title: Rounding allowance
+    text: A difference of 1 unit or 1 percent is label rounding, not a mistake.
+  - id: D5
+    title: PC and PK
+    text: A legacy PC or PK converts to EA automatically. Since 23 September a legacy of 1 PK or 1 EA is read as one package when the description confirms Excel's piece count.
+  - id: D6
+    title: No category rule from the reviewer
+    text: Where the reviewer's answers differ by product (candles 6 EA × 1, cup noodles 1 EA × 6), the engine keeps whatever Excel has when the text confirms it and does not impose a category rule.
+# The complete pipeline, drawn on the Pipeline tab. `count` names a live number from the job.
+pipeline:
+  nodes:
+    - id: upload
+      kind: start
+      title: Upload the workbook
+      summary: The Excel file is received and stored unchanged.
+      detail: >-
+        The uploaded file is kept exactly as received. Every later step reads from it; nothing is
+        written back into it until the download is generated at the very end.
+      inputs: [The Excel workbook, sheet UoM_Field_Extract]
+      outputs: [A stored copy of the file, a job number]
+      count: workbook_rows
+      count_label: rows in the file
+    - id: select
+      kind: process
+      title: Select the departments
+      summary: Only the rows of the chosen departments are processed.
+      detail: >-
+        The workbook holds every department. Only the departments chosen at upload are read.
+        Rows outside them are never touched and come back in the download exactly as uploaded.
+      inputs: [All rows of the file, the chosen departments]
+      outputs: [The rows in scope]
+      count: department_rows
+      count_label: rows in scope
+    - id: read
+      kind: process
+      title: Read each row
+      summary: Item number, six descriptions, legacy I/J, Excel K/L/M.
+      detail: >-
+        For every row in scope the tool reads the item number, the six description fields
+        (brand, item description and web description, each in English and Chinese), the legacy
+        size and unit (columns I and J) and the three values being cleansed: unit size, unit and
+        pack size (columns K, L and M). Columns B and C are never used; they are copies.
+      inputs: [The rows in scope]
+      outputs: [One product record per row]
+      rules_tab: description_reading
+    - id: purge
+      kind: decision
+      title: Empty or purged product?
+      summary: A product with no details is skipped.
+      detail: >-
+        A purged product record with no details is skipped. Nothing is read from it and nothing is
+        changed. It comes back in the download exactly as uploaded, marked "Skipped".
+      inputs: [One product record]
+      outputs: [Skipped, or on to the lane decision]
+      count: purged
+      count_label: skipped
+    - id: lane
+      kind: decision
+      title: Which lane?
+      summary: Complete values, legacy only, or nothing usable.
+      detail: >-
+        Lane A: unit size, unit and pack size are all filled in, so they are only checked.
+        Lane B: they are missing but a legacy value exists, so they are filled in from it.
+        Lane C: nothing usable exists, so the descriptions are read. A row never changes lane.
+      inputs: [One product record]
+      outputs: [Lane A, Lane B or Lane C]
+      count: live
+      count_label: live rows
+    - id: lane_a
+      kind: lane
+      title: Lane A · check the existing values
+      summary: All three values present. Checked, never rewritten without review.
+      detail: >-
+        The values are first checked for form: positive numbers, a known unit spelling, a whole
+        number pack size. Then the legacy value is compared with them, and then the descriptions.
+        Nothing in Lane A is changed automatically except spelling and format. No AI call is made
+        in Lane A today: every check here is arithmetic and text matching, which is what the
+        reviewer's confirmed answers needed. An AI call that only writes the explanation for the
+        rows still in review is planned, not built.
+      inputs: [Complete K/L/M, legacy I/J, six descriptions]
+      outputs: [A label and, where needed, a suggestion]
+      count: group_a
+      count_label: rows
+      rules_tab: legacy_checks
+    - id: a_legacy
+      kind: process
+      title: Compare with the legacy value
+      summary: Seven possible outcomes. The first that fits decides.
+      detail: >-
+        The legacy value (columns I and J) is converted with the unit table and compared with the
+        three Excel values. The lines below are tried from the top; the first one that fits gives
+        the row its label. Only the last three send the row to a person.
+      steps:
+        - "Legacy equals Excel's unit size → Already correct."
+        - "Legacy equals unit size × pack size, so it is the whole pack → Correct, with a note."
+        - "Legacy is within 1 unit or 1 percent of either → Correct, with a note (label rounding)."
+        - "Legacy differs, but the description states exactly what Excel has → Correct, with a note."
+        - "Legacy size × a count in the description equals Excel's total → Needs review; size and pack suggested together."
+        - "Legacy is a weight where Excel is a volume, or the reverse → Needs review."
+        - "Legacy differs and nothing explains it → Needs review; the converted legacy value is suggested."
+      inputs: [K/L/M, legacy I/J, the descriptions]
+      outputs: [Already correct, a note, or a review with a suggestion]
+      rules_tab: legacy_checks
+    - id: a_text
+      kind: process
+      title: Compare with the descriptions
+      summary: Languages against each other, and counts against the pack size.
+      detail: >-
+        The English and Chinese text of the same field are compared with each other and with the
+        Excel values. No side is ever picked automatically.
+      steps:
+        - "English and Chinese state a different size or count → Needs review."
+        - "The description states a size that is neither the unit size nor the whole pack → Needs review."
+        - "The description states Excel's unit size next to a count that is not Excel's pack size → Needs review, no value suggested."
+        - "The package wording can be read more than one way and Excel matches none → Needs review."
+        - "A number in the description is a grade, capacity or name, not a size → Correct, with a note."
+      inputs: [K/L/M, the descriptions]
+      outputs: [Confirmed, or a review]
+      rules_tab: description_reading
+    - id: lane_b
+      kind: lane
+      title: Lane B · fill in from the legacy value
+      summary: Excel blank, legacy present. Converted by the unit table.
+      detail: >-
+        The legacy value is converted with the agreed unit mapping table and rounded to a whole
+        number the way Excel rounds. A unit that is not in the table is left blank and marked
+        "could not determine". Where the legacy gives only a count, the pack size may be read by
+        the AI, and then a person confirms it.
+      inputs: [Legacy I/J, the descriptions for the pack size]
+      outputs: [Unit size and unit filled in]
+      count: group_b
+      count_label: rows
+      rules_tab: unit_mapping
+    - id: b_convert
+      kind: process
+      title: Convert with the unit table
+      summary: 1 KG becomes 1000 GM, 12 OZ becomes 340 GM.
+      detail: >-
+        Twelve conversion rows, including Chinese spellings. Results are rounded to whole numbers.
+        A legacy PC or PK becomes EA. An ounce in a liquid category is a fluid ounce; in a mixed
+        category a person decides.
+      inputs: [Legacy size and unit]
+      outputs: [Standard size and unit]
+      rules_tab: unit_mapping
+    - id: b_guards
+      kind: process
+      title: Safety checks
+      summary: Stop the value if the text or the category argues against it.
+      detail: >-
+        The converted value is held for a person when the description states a different size,
+        when an ounce could be weight or fluid, or when the AI read the pack size from a piece
+        count that could be the contents.
+      inputs: [The converted value, the descriptions]
+      outputs: [Applied automatically, or a review]
+      rules_tab: ai_rules
+    - id: lane_c
+      kind: lane
+      title: Lane C · read the descriptions
+      summary: Nothing usable. The AI reads the six fields, blind to everything else.
+      detail: >-
+        The AI sees only the six description fields and the product category as context. It never
+        sees the legacy value or the Excel values. It may only report a size or count that is
+        literally written in the text. If nothing is written, it says so and the row is left blank.
+      inputs: [The six descriptions, the category]
+      outputs: [A size and a pack count with quoted evidence, or nothing]
+      count: group_c
+      count_label: rows
+      rules_tab: ai_rules
+    - id: c_ai
+      kind: process
+      title: AI reads the text
+      summary: Quotes the exact words. Never converts, never guesses.
+      detail: >-
+        The AI reports every number it finds and what it means: amount in one piece, total of the
+        pack, capacity of a container, a dimension, a name or grade. It returns the exact fragment
+        it read. Every new version of its instructions must pass all thirty hard cases first.
+      inputs: [The six descriptions]
+      outputs: [Readings with quoted evidence]
+      count: ai_calls
+      count_label: AI calls this run
+      rules_tab: ai_rules
+    - id: c_guards
+      kind: process
+      title: Safety checks
+      summary: Capacity, grade, range and pack-count checks.
+      detail: >-
+        A reading is held when the number describes a container or a name, when it is far outside
+        the category's usual range, or when a pack count could be the contents rather than the pack
+        sold. Anything that passes is applied; anything held goes to a person.
+      inputs: [The AI readings]
+      outputs: [Applied automatically, or a review]
+      rules_tab: ai_rules
+    - id: ledger
+      kind: process
+      title: Give every row one label
+      summary: Already correct · Corrected automatically · Correct with a note · Needs your review · Could not determine · Skipped.
+      detail: >-
+        Every row ends with exactly one label, the findings that explain it, and the values the
+        download would carry. The same wording is used on screen and in the Excel comment.
+      inputs: [The outcome of the lane]
+      outputs: [One label, findings, final values]
+      count: live
+      count_label: rows labelled
+    - id: reason
+      kind: side
+      title: AI reasoning (trial)
+      summary: Reads every source for the rows still open and says what it would decide. Shadow only.
+      detail: >-
+        A second, separate AI task runs only on rows the rules could not close. It sees the six
+        descriptions, the category, the legacy value, the Excel values and what the rules said, and
+        answers like a reviewer would: what one unit is, what each source means, a verdict, a
+        complete proposed value with the words it relied on, and whether the answer depends on a
+        business rule. Today its answers are stored and shown beside each row; they change nothing.
+        Fixed rules from the business: the description wins over Excel; product-kind knowledge
+        (liquid or solid) is allowed; standard units are GM, ML and EA only.
+      steps:
+        - "The text states the deciding fact in so many words, nothing depends on a business rule or product knowledge, every safety check passes → Could apply automatically (not switched on yet)."
+        - "The answer follows from arithmetic on the sources, or rests on product knowledge, or the split is a business choice → Suggestion for a person, with the reasoning."
+        - "The descriptions state no quantity and the sources disagree → Stays with a person; the explanation says what to check."
+      inputs: [Rows needing review or could not determine, every source for the row]
+      outputs: [A verdict, a proposal and an explanation per row, stored for scoring]
+      count: reasoning_rows
+      count_label: rows reasoned
+      rules_tab: ai_rules
+    - id: review
+      kind: process
+      title: People decide
+      summary: Keep Excel, use the suggestion, or enter values.
+      detail: >-
+        Every "Needs your review" row shows what was found and offers three choices. The workbook
+        is not changed until a person decides. Unreviewed rows keep their uploaded values.
+      inputs: [Rows needing review]
+      outputs: [Decisions]
+      count: status:REVIEW_REQUIRED
+      count_label: rows to review
+    - id: export
+      kind: end
+      title: Download the workbook
+      summary: Final values, a colour per label, a comment on every row.
+      detail: >-
+        The original file is patched in place: the three cleansed columns, then a group column, a
+        colour-coded status column and a plain-language comment, followed by the audit columns.
+        Rows outside the chosen departments are untouched.
+      inputs: [Final values and decisions]
+      outputs: [The cleansed workbook]
+    - id: measure
+      kind: side
+      title: Measure and compare
+      summary: Accuracy, hard cases, Past vs New, Open questions.
+      detail: >-
+        Alongside the pipeline: the AI is tested blind on real descriptions, every automatic change
+        is scored, each new run is compared row by row with the previous one, and every row that is
+        not simply correct is grouped into a question for the business.
+      inputs: [Every processed row]
+      outputs: [Accuracy figures, comparisons, questions]
+  edges:
+    - [upload, select]
+    - [select, read]
+    - [read, purge]
+    - [purge, lane, "no"]
+    - [purge, ledger, "yes · skipped"]
+    - [lane, lane_a, "complete"]
+    - [lane, lane_b, "legacy only"]
+    - [lane, lane_c, "nothing usable"]
+    - [lane_a, a_legacy]
+    - [a_legacy, a_text]
+    - [a_text, ledger]
+    - [lane_b, b_convert]
+    - [b_convert, b_guards]
+    - [b_guards, ledger]
+    - [lane_c, c_ai]
+    - [c_ai, c_guards]
+    - [c_guards, ledger]
+    - [ledger, reason, "still open"]
+    - [reason, review, "with reasoning"]
+    - [ledger, export]
+    - [review, export]
+    - [ledger, measure]
+  labels:
+    - {label: Already correct, status: NO_CHANGE}
+    - {label: Corrected automatically, status: AUTO_APPLY}
+    - {label: Correct, with a note, status: OBSERVATION_ONLY}
+    - {label: Needs your review, status: REVIEW_REQUIRED}
+    - {label: Could not determine, status: UNRESOLVED}
+    - {label: Skipped, status: SKIPPED}
+
+# The AI reasoning task, shown on its own Rules sub-tab.
+reasoning:
+  status: SHADOW
+  status_text: >-
+    Trial. Its answers are stored and shown beside each row. It does not change any value, any
+    label, the suggestions or the download.
+  what: >-
+    A second, separate AI task that runs after the rules, only on rows the rules could not close
+    ("Needs your review" and "Could not determine"). Unlike the blind reader used for Lane C, it
+    sees everything for the row and reasons the way an experienced reviewer would: what the product
+    is, what each number means, which source to trust, and why.
+  sees:
+    - The six description fields, English and Chinese
+    - The product category, and whether that category is treated as liquid, mixed or unknown
+    - The legacy size and unit (columns I and J)
+    - The Excel unit size, unit and pack size (K, L, M) and their total
+    - "What the rules concluded: the label, the comment and any suggestion"
+  never_sees:
+    - Excel columns B and C
+    - Prices, brands' catalogues, websites or images
+    - The answers of other rows
+  returns:
+    - What one unit of the product is (a can, a cup noodle, a candle)
+    - "What each source's number means: amount in one piece, the whole pack, a package count, a piece count, not a size, or silent"
+    - "A verdict: Excel is right, the legacy is right, the description is right, the sources combine, or cannot tell"
+    - A complete proposed unit size, unit and pack size, or none
+    - A two-sentence explanation a reviewer can act on
+    - The exact words it relied on, checked to be present in the named field
+    - Whether the answer depends on a business rule (for example 6 × 1 versus 1 × 6)
+    - What product knowledge it used, if any
+    - "A confidence: high only when the text states the deciding fact; medium for arithmetic; low for product knowledge"
+  fixed_rules:
+    - Standard units are GM, ML and EA only; anything else is converted and rounded to a whole number.
+    - When the product's own description disagrees with Excel, the description wins (decided 23 September 2026).
+    - It may know what kind of thing a product is, liquid or solid, single or multipack, and must say when it used that (decided 23 September 2026).
+    - It may never use typical sizes, brand knowledge or prices.
+    - An ounce is a fluid ounce for a liquid, a weight ounce for a solid; when the category is mixed and the text does not say, it answers cannot tell.
+    - Every quoted fragment must be present, word for word, in the field it names; otherwise the answer is rejected and asked for once more.
+    - A wrong confident answer is worse than cannot tell.
+  policy:
+    - tier: Could apply automatically
+      when: High confidence, evidence quoted from the text, no business-rule flag, no product knowledge, and every safety check passes.
+      today: Stored and shown only. Switched on per problem category, after a labelled pass proves it.
+    - tier: Suggestion for a person
+      when: Medium or low confidence, or the answer depends on a business rule or product knowledge.
+      today: Stored and shown only. Next step is to make it the review suggestion, with its explanation.
+    - tier: Stays with a person
+      when: Cannot tell, because the descriptions state no quantity and the sources disagree.
+      today: The explanation tells the reviewer what to check on the pack.
+  safety_checks:
+    - Units must be GM, ML or EA.
+    - Quantities must be positive; a pack size must be a whole number.
+    - A total may change only when the verdict rests on a source that states the new total.
+    - The same checks that guard the rules and the blind reader apply before anything could be written.
+  gate:
+    - "Its own case file of twenty products with expected verdicts: Eric's ten plus one from each problem category."
+    - Every new version of its instructions must match all of them with zero confident wrong answers.
+    - Each shadow run also scores 100 note rows it should agree with and 100 already-correct rows for false alarms.
+  versions:
+    prompt: uom-reconcile-v2
+    trial: lane-a-trial-v2
+# How each group's accuracy is worked out, step by step, in plain words. Shown on the
+# Accuracy tab under each group. {placeholders} are filled with that group's numbers.
+accuracy_method:
+  A:
+    - "Start with every product that already had all three values filled in: {products} products. Nothing is sampled."
+    - "Read the product's own descriptions, English and Chinese. If they state the same size or piece count Excel has, the product is confirmed by its own words: {confirmed} products."
+    - "If the descriptions state a different weight or volume than the value kept, the product counts as wrong, because the description wins: {wrong} products."
+    - "Otherwise compare with the older size field. If it holds the same value, the same whole pack, or the same value within label rounding, the product is consistent with another record: {consistent} products. This rules out a typo, not a shared mistake, so it is shown in a lighter shade."
+    - "Products where the older field disagrees and nothing readable settles it are sent to a person: {flags} products. They sit beside the score, not inside it. Where the reasoning layer quoted words that show Excel was right, the review was not needed: {alarms} of them."
+    - "Products with no older field to compare and no quantity in the text cannot be checked: {unverified}. They are shown and left out."
+    - "Accuracy = correct ÷ checked = ({confirmed} + {consistent}) ÷ ({confirmed} + {consistent} + {wrong}) = {right} ÷ {scored} = {accuracy}%."
+  B:
+    - "Start with every product whose values were missing and were filled in from the older size field with the unit table: {products} products."
+    - "The arithmetic itself is a fixed table, tested by machine on every version, so the question is only whether the table was applied to the right product."
+    - "Read the product's own descriptions. If they state the converted size, the product is confirmed: {confirmed} products. If they state a different size, it counts as wrong: {wrong} products."
+    - "Two more checks give consistency, not proof: a value that only had its unit respelled (200 G to 200 GM) and still equals the older field, and an ounce read as weight or fluid the way nine in ten products of the same category are measured. Together: {consistent} products."
+    - "Ounces in mixed categories, pack counts read from the text, values the text contradicts, and units not in the table are sent to a person: {flags} products, beside the score."
+    - "Everything else was converted correctly by the table but has nothing to check it against, so it is shown and left out: {unverified} products. That is why coverage is {coverage}%."
+    - "Accuracy = correct ÷ checked = {right} ÷ {scored} = {accuracy}%, on the {coverage}% that could be checked."
+  C:
+    - "Start with every product that had nothing usable, so the descriptions were read: {products} products."
+    - "If the reader found a size, it is confirmed only when those exact words are in the description; if the description states a different size, it counts as wrong."
+    - "If the reader found nothing, a second, independent reading is done. When it also finds nothing written, leaving the product blank is the correct answer: {confirmed} products. That counts as a win, not a failure."
+    - "A pack count read from the text is sent to a person to confirm whether it is the pack sold or the contents: {flags} products."
+    - "A blank that a second reader has not yet confirmed cannot be checked and is left out: {unverified} products."
+    - "Accuracy = correct ÷ checked = {right} ÷ {scored} = {accuracy}%."
+    - "Because this group only shows what the reader did on this workbook, the reader is also measured against known answers: the sizes of 370 products were hidden and it had to read them from the text alone. That result is shown beside the group."

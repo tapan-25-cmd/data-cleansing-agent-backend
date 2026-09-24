@@ -14,7 +14,9 @@ from app.services.discrepancy_service import (
     matches_value,
     within_conversion_tolerance,
     packaging_levels,
+    extract_field_signals,
 )
+from app.domain.product import InputProduct
 from app.services.excel_reader import FIELD_MAP, WorkbookRow
 from app.services.normalization import blank
 from app.services.packaging_expression_service import (
@@ -22,9 +24,27 @@ from app.services.packaging_expression_service import (
     matching_interpretations,
 )
 from app.services.rule_engine import RuleEngine
+from app.services.klm_reconciliation_service import (
+    LegacyAssessment,
+    KLMReconciliationService,
+    LegacyRelationship,
+)
 
 
-GROUP_A_VALIDATION_VERSION = "group-a-validation-v2"
+GROUP_A_VALIDATION_VERSION = "group-a-validation-v5"
+# (field name used for evidence, attribute on InputProduct)
+_DESCRIPTION_FIELDS = (
+    ("item_desc_eng", "item_desc_eng"),
+    ("item_desc_local_lang", "item_desc_local"),
+    ("web_description_eng", "web_description_eng"),
+    ("web_description_chi", "web_description_chi"),
+)
+_FIELD_NAMES = {
+    "item_desc_eng": "item description, English",
+    "item_desc_local_lang": "item description, local language",
+    "web_description_eng": "web description, English",
+    "web_description_chi": "web description, local language",
+}
 STANDARD_UOM_ALIAS_VERSION = "standard-uom-aliases-v1"
 
 
@@ -49,6 +69,8 @@ class ValidationIssue:
     message: str
     current_value: object | None = None
     expected_value: object | None = None
+    # Complete values a linked suggestion proposes together, e.g. size and pack.
+    proposed: dict[str, str] | None = None
 
     def as_dict(self) -> dict[str, object | None]:
         return {
@@ -58,6 +80,7 @@ class ValidationIssue:
             "message": self.message,
             "current_value": _json_value(self.current_value),
             "expected_value": _json_value(self.expected_value),
+            "proposed": dict(self.proposed) if self.proposed else None,
         }
 
 
@@ -188,6 +211,7 @@ class GroupAValidator:
 
     def __init__(self, comparison_engine: RuleEngine):
         self.comparison_engine = comparison_engine
+        self.klm_reconciliation = KLMReconciliationService(comparison_engine)
 
     def validate(
         self,
@@ -258,7 +282,9 @@ class GroupAValidator:
         checked_pack = pack if pack is not None else Decimal("0")
 
         if not invalid:
-            issues.extend(self._legacy_issues(row, checked_size, canonical_uom))
+            issues.extend(self._legacy_issues(
+                row, checked_size, canonical_uom, checked_pack,
+            ))
             report = discrepancies or analyze_discrepancies(row.product)
             # Only an explicit bilingual *measurement* conflict disqualifies a row
             # from Group A. A bilingual count conflict is a packaging-level
@@ -313,6 +339,9 @@ class GroupAValidator:
                 supported_packaging_fields.update({"web_description_eng", "web_description_chi"})
             if supported_packaging_fields & {"item_desc_eng", "item_desc_local_lang"}:
                 supported_packaging_fields.update({"item_desc_eng", "item_desc_local_lang"})
+            issues.extend(self._pack_count_notes(
+                row.product, checked_size, canonical_uom, checked_pack,
+            ))
             issues.extend(self._description_warnings(
                 report,
                 checked_size,
@@ -348,12 +377,19 @@ class GroupAValidator:
         row: WorkbookRow,
         standard_size: Decimal,
         standard_uom: str,
+        standard_pack_size: Decimal,
     ) -> list[ValidationIssue]:
         product = row.product
         if blank(product.legacy_size) or blank(product.legacy_uom):
             return []
-        proposal = self.comparison_engine.propose(product.legacy_size, product.legacy_uom)
-        if proposal is None:
+        assessment = self.klm_reconciliation.assess_legacy(
+            legacy_size=product.legacy_size,
+            legacy_uom=product.legacy_uom,
+            standard_size=standard_size,
+            standard_uom=standard_uom,
+            standard_pack_size=standard_pack_size,
+        )
+        if assessment.relationship == LegacyRelationship.NOT_COMPARABLE:
             return [ValidationIssue(
                 "LEGACY_NOT_COMPARABLE", "legacy_uom", ValidationSeverity.INFO,
                 (
@@ -363,46 +399,241 @@ class GroupAValidator:
                 ),
                 product.legacy_uom,
             )]
-        if proposal.standard_uom != standard_uom:
+        if assessment.relationship in {
+            LegacyRelationship.UOM_MISMATCH, LegacyRelationship.SIGNIFICANT_MISMATCH,
+        }:
+            confirmed = self._description_confirmation(
+                product, standard_size, standard_uom, standard_pack_size,
+                legacy_unit=assessment.expected_uom,
+            )
+            if confirmed is not None:
+                return [confirmed]
+        if assessment.relationship == LegacyRelationship.UOM_MISMATCH:
             return [ValidationIssue(
                 "LEGACY_UOM_MISMATCH", "standard_uom", ValidationSeverity.WARNING,
                 "Legacy conversion targets a different standardized UOM",
-                standard_uom, proposal.standard_uom,
+                standard_uom, assessment.expected_uom,
             )]
-        # Group B conversions intentionally use Excel-style nearest-whole
-        # rounding. Group A validation must not apply that rounding to an
-        # identity comparison (for example 4.5 GM -> GM), otherwise a correct
-        # existing decimal becomes a false 5 GM mismatch.
-        expected_size = (
-            proposal.raw_target
-            if proposal.source_uom == proposal.target_uom
-            and proposal.factor == Decimal("1")
-            else proposal.standard_size
-        )
-        if expected_size != standard_size:
-            identity = (
-                proposal.source_uom == proposal.target_uom
-                and proposal.factor == Decimal("1")
+        if assessment.relationship in {
+            LegacyRelationship.TOTAL_MATCH,
+            LegacyRelationship.TOTAL_ROUNDING_MATCH,
+        }:
+            return [ValidationIssue(
+                "LEGACY_TOTAL_CONSISTENT", "standard_size", ValidationSeverity.INFO,
+                (
+                    "Legacy value matches the existing whole-pack total (K × M); "
+                    "it is not a replacement for unit size K"
+                ),
+                f"{standard_size} {standard_uom} × {standard_pack_size}",
+                f"{assessment.expected_value} {assessment.expected_uom}",
+            )]
+        if assessment.relationship == LegacyRelationship.UNIT_ROUNDING_MATCH:
+            return [ValidationIssue(
+                "ROUNDING_ONLY_VARIANCE", "standard_size", ValidationSeverity.INFO,
+                "Existing standardized size is within the approved conversion tolerance (1 unit or 1%)",
+                str(standard_size), str(assessment.expected_value),
+            )]
+        if assessment.relationship == LegacyRelationship.SIGNIFICANT_MISMATCH:
+            linked = self._linked_suggestion(
+                product, standard_size, standard_uom, standard_pack_size, assessment,
             )
-            if not identity and within_conversion_tolerance(expected_size, standard_size):
-                return [ValidationIssue(
-                    "ROUNDING_ONLY_VARIANCE",
-                    "standard_size",
-                    ValidationSeverity.INFO,
-                    "Existing standardized size is within the approved conversion tolerance (1 unit or 1%)",
-                    str(standard_size),
-                    str(expected_size),
-                )]
+            if linked is not None:
+                return [linked]
             return [ValidationIssue(
                 "SIGNIFICANT_LEGACY_SIZE_MISMATCH", "standard_size", ValidationSeverity.WARNING,
                 (
                     "Existing standardized size differs from the exact legacy value"
-                    if identity
+                    if assessment.exact_identity
                     else "Existing standardized size differs from the rounded legacy conversion"
                 ),
-                str(standard_size), str(expected_size),
+                str(standard_size), str(assessment.expected_value),
             )]
         return []
+
+    @staticmethod
+    def _description_counts(product: InputProduct) -> dict[Decimal, list[str]]:
+        counts: dict[Decimal, list[str]] = {}
+        for field, attribute in _DESCRIPTION_FIELDS:
+            for count in extract_field_signals(field, getattr(product, attribute)).counts:
+                counts.setdefault(Decimal(count.value), []).append(
+                    f"{count.fragment} ({_FIELD_NAMES[field]})"
+                )
+        return counts
+
+    def _linked_suggestion(
+        self,
+        product: InputProduct,
+        standard_size: Decimal,
+        standard_uom: str,
+        standard_pack_size: Decimal,
+        assessment: LegacyAssessment,
+    ) -> ValidationIssue | None:
+        """Legacy size × a count in the description equals Excel's total.
+
+        Excel 550 GM × 1, legacy 55 GM, description `\\10`: 55 × 10 = 550. The legacy
+        is the size of one pack and the description gives the number of packs, so
+        the suggestion is both fields together, with the total unchanged. It is
+        still a review: the representation (one pack of ten versus ten packs) is
+        a business choice the text alone does not settle. A size-only suggestion
+        here would silently shrink the total to 55.
+        """
+        expected = assessment.expected_value
+        if expected is None or assessment.expected_uom != standard_uom:
+            return None
+        total = standard_size * standard_pack_size
+        for count, fragments in sorted(self._description_counts(product).items()):
+            if count <= Decimal("1") or count == standard_pack_size:
+                continue
+            if expected * count == total:
+                return ValidationIssue(
+                    "LINKED_SIZE_AND_PACK_SUGGESTION", "standard_size", ValidationSeverity.WARNING,
+                    (
+                        f"The legacy {product.legacy_size} {product.legacy_uom} is one pack and "
+                        f"the description counts {count} packs: {expected} {standard_uom} × "
+                        f"{count} = {total} {standard_uom}, the same total Excel has as "
+                        f"{standard_size} {standard_uom} × {standard_pack_size}."
+                    ),
+                    f"{standard_size} {standard_uom} × {standard_pack_size}",
+                    "; ".join(dict.fromkeys(fragments)),
+                    proposed={
+                        "standard_size": format(expected.normalize(), "f"),
+                        "standard_uom": standard_uom,
+                        "standard_pack_size": format(count.normalize(), "f"),
+                    },
+                )
+        return None
+
+    @staticmethod
+    def _pack_count_notes(
+        product: InputProduct,
+        standard_size: Decimal,
+        standard_uom: str,
+        standard_pack_size: Decimal,
+    ) -> list[ValidationIssue]:
+        """The description states Excel's unit size next to a count that is not
+        Excel's pack size (`CASE 25 X 120GM` against 120 GM × 50). A note only:
+        which source is right is a business question, and the count may be a
+        nested level (`3'S CASE 16 X 185GM` states 16, so it is not raised)."""
+        dimension = {"GM": "WEIGHT", "ML": "VOLUME"}.get(standard_uom)
+        if dimension is None:
+            return []
+        notes: list[ValidationIssue] = []
+        for pair in (("item_desc_eng", "item_desc_local"), ("web_description_eng", "web_description_chi")):
+            supports_unit = False
+            counts: dict[Decimal, list[str]] = {}
+            for attribute in pair:
+                field = next(f for f, a in _DESCRIPTION_FIELDS if a == attribute)
+                signals = extract_field_signals(field, getattr(product, attribute))
+                converted = any(m.source_uom != m.uom for m in signals.measurements)
+                if any(
+                    m.dimension == dimension and matches_value(m.value, standard_size, converted=converted)
+                    for m in signals.measurements
+                ):
+                    supports_unit = True
+                for count in signals.counts:
+                    counts.setdefault(Decimal(count.value), []).append(
+                        f"{count.fragment} ({_FIELD_NAMES[field]})"
+                    )
+            if not supports_unit or not counts or standard_pack_size in counts:
+                continue
+            stated = ", ".join(format(c.normalize(), "f") for c in sorted(counts))
+            notes.append(ValidationIssue(
+                "DESCRIPTION_PACK_COUNT_DIFFERS", "standard_pack_size", ValidationSeverity.WARNING,
+                (
+                    f"The description states the unit size {standard_size} {standard_uom} "
+                    f"with a count of {stated}, while Excel has a pack size of "
+                    f"{standard_pack_size}. Nothing was changed and nothing is suggested: "
+                    "a person confirms which is current."
+                ),
+                format(standard_pack_size.normalize(), "f"),
+                "; ".join(dict.fromkeys(f for fs in counts.values() for f in fs)),
+            ))
+            break  # one note per row is enough
+        return notes
+
+    @staticmethod
+    def _description_confirmation(
+        product: InputProduct,
+        standard_size: Decimal,
+        standard_uom: str,
+        standard_pack_size: Decimal,
+        *,
+        legacy_unit: str | None,
+    ) -> ValidationIssue | None:
+        """The product's own description states the values Excel already has.
+
+        The legacy value then does not contradict Excel; most often it counts the
+        package (1 PK) where Excel counts what is inside (6 EA, or 500 ML × 2).
+        The row is confirmed with a note instead of being sent to a person. Two
+        shapes are accepted, both requiring the description to be explicit:
+
+        - pieces: Excel says N EA × 1, the description states the count N, and the
+          legacy is either a single package (value 1) or a weight/volume, which
+          measures the product differently rather than counting it differently;
+        - measured: the description states Excel's unit size, and either the legacy
+          is a single package with M = 1, or the description also states M.
+
+        A description that states only the size while the legacy carries a count
+        (legacy 50 PC, Excel 1 GM × 1, text 1G) is not a confirmation: the legacy
+        count may be the missing pack size, so that row still goes to review.
+        """
+        dimension = {"GM": "WEIGHT", "ML": "VOLUME"}.get(standard_uom)
+        try:
+            legacy_value = Decimal(str(product.legacy_size).strip())
+        except (InvalidOperation, ValueError):
+            legacy_value = None
+        single_package = legacy_value == Decimal("1")
+        legacy_measures = legacy_unit in {"GM", "ML"}
+        size_fragments: list[str] = []
+        count_fragments: dict[Decimal, list[str]] = {}
+        for field, attribute in _DESCRIPTION_FIELDS:
+            signals = extract_field_signals(field, getattr(product, attribute))
+            converted = any(m.source_uom != m.uom for m in signals.measurements)
+            for measurement in signals.measurements:
+                if dimension and measurement.dimension == dimension and matches_value(
+                    measurement.value, standard_size, converted=converted,
+                ):
+                    size_fragments.append(f"{measurement.fragment} ({_FIELD_NAMES[field]})")
+            for count in signals.counts:
+                count_fragments.setdefault(Decimal(count.value), []).append(
+                    f"{count.fragment} ({_FIELD_NAMES[field]})"
+                )
+        excel = f"{standard_size} {standard_uom} × {standard_pack_size}"
+        legacy = f"{product.legacy_size} {product.legacy_uom}".strip()
+        if (
+            standard_uom == "EA" and standard_pack_size == Decimal("1")
+            and (single_package or legacy_measures) and standard_size in count_fragments
+        ):
+            return ValidationIssue(
+                "DESCRIPTION_CONFIRMS_PIECE_COUNT", "standard_size", ValidationSeverity.INFO,
+                (
+                    f"The description states {standard_size} pieces, which matches Excel. "
+                    + (
+                        f"The legacy {legacy} is the package, not one piece."
+                        if single_package
+                        else f"The legacy {legacy} measures the product by weight or volume "
+                        "instead of counting pieces; it does not contradict the count."
+                    )
+                ),
+                excel, "; ".join(dict.fromkeys(count_fragments[standard_size])),
+            )
+        if dimension and size_fragments:
+            pack_confirmed = (
+                standard_pack_size > Decimal("1") and standard_pack_size in count_fragments
+            )
+            if pack_confirmed or (standard_pack_size == Decimal("1") and single_package):
+                fragments = list(size_fragments)
+                if pack_confirmed:
+                    fragments += count_fragments[standard_pack_size]
+                return ValidationIssue(
+                    "DESCRIPTION_CONFIRMS_UNIT_SIZE", "standard_size", ValidationSeverity.INFO,
+                    (
+                        f"The description states {excel}, which matches Excel. "
+                        f"The legacy {legacy} does not contradict it."
+                    ),
+                    excel, "; ".join(dict.fromkeys(fragments)),
+                )
+        return None
 
     @staticmethod
     def _description_warnings(

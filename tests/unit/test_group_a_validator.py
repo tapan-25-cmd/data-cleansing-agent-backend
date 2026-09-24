@@ -8,6 +8,7 @@ from app.services.excel_reader import FIELD_MAP, WorkbookRow
 from app.services.group_a_validator import (
     GroupAValidationStatus,
     GroupAValidator,
+    ValidationSeverity,
 )
 from app.services.rule_engine import RuleEngine
 
@@ -55,7 +56,7 @@ def test_canonical_positive_numeric_fields_are_valid_and_preserved():
     assert result.status == GroupAValidationStatus.VALID
     assert result.standard_size == Decimal("500.5")
     assert result.normalization_proposal()["standard_size"] == "500.5"
-    assert result.as_dict()["policy_version"] == "group-a-validation-v2"
+    assert result.as_dict()["policy_version"] == "group-a-validation-v5"
     assert len(result.as_dict()["alias_checksum"]) == 64
 
 
@@ -191,6 +192,23 @@ def test_material_conversion_difference_is_significant():
     assert issue.expected_value == "349"
 
 
+def test_legacy_whole_pack_total_is_observation_not_k_only_correction():
+    result = validator().validate(candidate(
+        legacy_size="350",
+        legacy_uom="GM",
+        standard_size="70",
+        raw_standard_size=70,
+        standard_uom="GM",
+        raw_standard_uom="GM",
+        standard_pack_size="5",
+        raw_standard_pack_size=5,
+    ))
+
+    assert result.status == GroupAValidationStatus.VALID
+    assert "LEGACY_TOTAL_CONSISTENT" in issue_codes(result)
+    assert "SIGNIFICANT_LEGACY_SIZE_MISMATCH" not in issue_codes(result)
+
+
 def test_incomplete_standard_fields_are_not_owned_by_group_a_validator():
     result = validator().validate(candidate(
         raw_standard_pack_size=None,
@@ -294,3 +312,139 @@ def test_a_real_error_is_still_outside_the_tolerance():
         raw_standard_size=907, raw_standard_uom="GM",
     ))
     assert "SIGNIFICANT_LEGACY_SIZE_MISMATCH" in issue_codes(result)
+
+
+def test_description_piece_count_confirms_ea_value_against_a_single_package_legacy():
+    """Eric's candles: legacy 1 PK, Excel 6 EA × 1, description 彩色長蠟燭6枝."""
+    result = validator().validate(candidate(
+        legacy_size="1", legacy_uom="PK",
+        standard_size="6", standard_uom="EA", standard_pack_size="1",
+        raw_standard_size=6, raw_standard_uom="EA",
+        item_desc_eng="MULTI COLOR CANDLE", item_desc_local="彩色長蠟燭6枝",
+    ))
+    assert result.status == GroupAValidationStatus.VALID
+    assert issue_codes(result) == {"DESCRIPTION_CONFIRMS_PIECE_COUNT"}
+    (issue,) = result.issues
+    assert issue.severity == ValidationSeverity.INFO
+    assert issue.expected_value == "6枝 (item description, local language)"
+
+
+def test_description_stating_size_and_count_confirms_excel_over_a_package_legacy():
+    """Legacy 1 PK, Excel 500 ML × 2, description GOLD LABEL 500MLX2 / 金標孖裝."""
+    result = validator().validate(candidate(
+        legacy_size="1", legacy_uom="PK",
+        standard_size="500", standard_uom="ML", standard_pack_size="2", raw_standard_pack_size=2,
+        item_desc_eng="GOLD LABEL 500MLX2", item_desc_local="金標孖裝",
+    ))
+    assert issue_codes(result) == {"DESCRIPTION_CONFIRMS_UNIT_SIZE"}
+    assert "500MLX2" in result.issues[0].expected_value
+
+
+def test_description_stating_only_the_size_does_not_silence_a_legacy_count():
+    """Legacy 50 PC, Excel 1 GM × 1, text SWEETENER\\1G: the 50 may be the missing pack."""
+    result = validator().validate(candidate(
+        legacy_size="50", legacy_uom="PC",
+        standard_size="1", standard_uom="GM", standard_pack_size="1",
+        raw_standard_size=1, raw_standard_uom="GM",
+        item_desc_eng="L/CAL SWEETENER\\1G", item_desc_local="低熱量代糖",
+    ))
+    assert "LEGACY_UOM_MISMATCH" in issue_codes(result)
+    assert not issue_codes(result) & {"DESCRIPTION_CONFIRMS_UNIT_SIZE", "DESCRIPTION_CONFIRMS_PIECE_COUNT"}
+
+
+def test_silent_description_leaves_the_legacy_review_in_place():
+    result = validator().validate(candidate(
+        legacy_size="1", legacy_uom="PK",
+        standard_size="6", standard_uom="EA", standard_pack_size="1",
+        raw_standard_size=6, raw_standard_uom="EA",
+        item_desc_eng="DRIED NOODLE", item_desc_local="優質光身麵",
+    ))
+    assert "SIGNIFICANT_LEGACY_SIZE_MISMATCH" in issue_codes(result)
+
+
+def test_description_piece_count_also_confirms_ea_when_legacy_is_a_weight():
+    """Legacy 32 GM (per cube), Excel 4 EA × 1, text DENSESOUP FISH\\4'S / 濃湯寶鮮魚濃湯4."""
+    result = validator().validate(candidate(
+        legacy_size="32", legacy_uom="GM",
+        standard_size="4", standard_uom="EA", standard_pack_size="1",
+        raw_standard_size=4, raw_standard_uom="EA",
+        item_desc_eng="DENSESOUP FISH\\4'S", item_desc_local="濃湯寶鮮魚濃湯4",
+    ))
+    assert issue_codes(result) == {"DESCRIPTION_CONFIRMS_PIECE_COUNT"}
+    assert "weight or volume" in result.issues[0].message
+
+
+def test_a_legacy_piece_count_that_disagrees_still_goes_to_review():
+    """Legacy 12 PC, Excel 6 EA × 1, text says 6: two counts disagree, a person decides."""
+    result = validator().validate(candidate(
+        legacy_size="12", legacy_uom="PC",
+        standard_size="6", standard_uom="EA", standard_pack_size="1",
+        raw_standard_size=6, raw_standard_uom="EA",
+        item_desc_eng="CANDLE 6'S", item_desc_local="蠟燭6枝",
+    ))
+    assert "SIGNIFICANT_LEGACY_SIZE_MISMATCH" in issue_codes(result)
+
+
+def test_legacy_size_times_description_count_equal_to_total_is_one_linked_suggestion():
+    """Eric's shrimp noodle 550624: legacy 55 GM, Excel 550 GM × 1, description NDL\\10."""
+    result = validator().validate(candidate(
+        legacy_size="55", legacy_uom="GM",
+        standard_size="550", standard_uom="GM", standard_pack_size="1",
+        raw_standard_size=550, raw_standard_uom="GM",
+        item_desc_eng="TY SHRIMP CR NDL\\10", item_desc_local="冬蔭蝦味奶油湯麵",
+    ))
+    assert issue_codes(result) == {"LINKED_SIZE_AND_PACK_SUGGESTION"}
+    (issue,) = result.issues
+    assert issue.severity == ValidationSeverity.WARNING
+    assert issue.proposed == {"standard_size": "55", "standard_uom": "GM", "standard_pack_size": "10"}
+    assert issue.as_dict()["proposed"]["standard_pack_size"] == "10"
+
+
+def test_no_matching_count_keeps_the_plain_size_mismatch():
+    result = validator().validate(candidate(
+        legacy_size="55", legacy_uom="GM",
+        standard_size="550", standard_uom="GM", standard_pack_size="1",
+        raw_standard_size=550, raw_standard_uom="GM",
+        item_desc_eng="TY SHRIMP CR NDL\\5", item_desc_local="冬蔭蝦味奶油湯麵",
+    ))
+    assert issue_codes(result) == {"SIGNIFICANT_LEGACY_SIZE_MISMATCH"}
+
+
+def test_printed_whole_pack_weight_within_tolerance_is_a_note_even_in_the_same_unit():
+    """Eric's egg noodles 016170: legacy 380 GM, Excel 63.4 GM × 6 = 380.4 GM."""
+    result = validator().validate(candidate(
+        legacy_size="380", legacy_uom="GM",
+        standard_size="63.4", standard_uom="GM", standard_pack_size="6",
+        raw_standard_size=63.4, raw_standard_uom="GM", raw_standard_pack_size=6,
+        item_desc_eng="FRIED EGG NOODLES", item_desc_local="蛋炒麵",
+    ))
+    assert issue_codes(result) == {"LEGACY_TOTAL_CONSISTENT"}
+
+
+def test_description_count_that_differs_from_excel_pack_size_is_a_review_without_suggestion():
+    """Eric's fish fillet 236638: web text CASE 25 X 120GM, Excel 120 GM × 50."""
+    result = validator().validate(candidate(
+        legacy_size="120", legacy_uom="GM",
+        standard_size="120", standard_uom="GM", standard_pack_size="50",
+        raw_standard_size=120, raw_standard_uom="GM", raw_standard_pack_size=50,
+        item_desc_eng="RED MARUBEAN MACKCS/", item_desc_local="辣椒魚柳原箱",
+        web_description_eng="RED MARUBEAN MACK.FILLET CHILI CASE 25 X 120GM",
+        web_description_chi="紅圈牌辣椒魚柳原箱25 X 120GM",
+    ))
+    assert result.status == GroupAValidationStatus.VALID
+    assert "DESCRIPTION_PACK_COUNT_DIFFERS" in issue_codes(result)
+    note = next(i for i in result.issues if i.code == "DESCRIPTION_PACK_COUNT_DIFFERS")
+    assert note.severity == ValidationSeverity.WARNING and note.current_value == "50"
+    assert note.proposed is None
+
+
+def test_nested_case_count_that_includes_excel_pack_size_is_not_a_note():
+    """Eric's tuna 235812: 3'S CASE 16 X 185GM with Excel 185 GM × 16 states the 16."""
+    result = validator().validate(candidate(
+        legacy_size="185", legacy_uom="GM",
+        standard_size="185", standard_uom="GM", standard_pack_size="16",
+        raw_standard_size=185, raw_standard_uom="GM", raw_standard_pack_size=16,
+        web_description_eng="B&F TUNA IN SPRING 3'S CASE 16 X 185GM",
+        web_description_chi="美味牌水浸吞拿魚三罐裝原箱16 X 185GM",
+    ))
+    assert "DESCRIPTION_PACK_COUNT_DIFFERS" not in issue_codes(result)

@@ -13,7 +13,7 @@ from app.agents.versions import AGENT_NAME, AGENT_VERSION, PROMPT_VERSION  # noq
 from app.config import Settings
 
 APP_NAME = "uom_cleansing"
-PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_inference_v3.md"
+PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_inference_v4.md"
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,7 @@ def build_uom_agent(settings: Settings) -> UomAgentBundle:
     )
     agent = LlmAgent(
         name=AGENT_NAME,
-        description="Extracts explicit unit-size and pack evidence from permitted product text.",
+        description="Interprets grounded product quantities and packaging relationships from permitted bilingual text.",
         model=model,
         instruction=prompt,
         input_schema=InferenceRequest,

@@ -9,6 +9,7 @@ from app.agents.provider import (
     InferenceResult,
     ObservedMeasurement,
     ProviderMetadata,
+    InvalidInferenceResponseError,
 )
 from app.rules.registry import load_default_registry
 from app.services.excel_reader import FIELD_MAP, INPUT_SHEET, PURGE_HEADERS
@@ -98,6 +99,8 @@ def test_processor_routes_rules_and_ai_without_crossing_paths(tmp_path: Path):
     assert by_item["000004"]["method"] == "AI_INFERENCE"
     assert by_item["000004"]["reason_code"] == "NOT_IN_DESCRIPTION"
     assert by_item["000004"]["ai_provenance"]["provider"] == "mock"
+    assert repository.job["quality"]["engine"]["processed_with_guards"] is True
+    assert repository.job["quality"]["engine"]["guards_version"]
 
 
 class ExtractingProvider:
@@ -366,6 +369,24 @@ def test_pack_agent_failure_isolated_from_b_conversion(tmp_path: Path):
     assert item["field_proposals"]["standard_pack_size"] is None
     assert item["pack_result"]["status"] == "AGENT_ERROR"
     assert item["pack_result"]["reason_code"] == "PACK_AGENT_ERROR"
+
+
+class InvalidPackProvider:
+    async def infer(self, request):
+        raise InvalidInferenceResponseError(
+            "repair exhausted",
+            validation_errors=["first invalid answer", "second invalid answer"],
+        )
+
+
+def test_pack_agent_records_both_invalid_response_attempts(tmp_path: Path):
+    item = _run_single_b_pack_case(tmp_path, InvalidPackProvider(), enabled=True)
+
+    assert item["pack_result"]["status"] == "AGENT_ERROR"
+    assert item["pack_result"]["validation_attempts"] == [
+        {"attempt": 1, "error": "first invalid answer"},
+        {"attempt": 2, "error": "second invalid answer"},
+    ]
 
 
 def test_progress_is_reported_while_the_job_runs(tmp_path: Path):

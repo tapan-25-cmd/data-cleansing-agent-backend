@@ -1,0 +1,25 @@
+version: reconcile-eval-v1
+# Expected outcome of the reasoning task per item, under the decisions of 23 September 2026:
+# the description wins over Excel; product-kind knowledge is allowed; standard units GM/ML/EA.
+# expected.values is the complete K/L/M the task should stand behind, or CANNOT_TELL.
+cases:
+  - {item_no: "236638", expected: {verdict: DESCRIPTION_RIGHT, values: {standard_size: "120", standard_uom: "GM", standard_pack_size: "25"}}, note: "Description says CASE 25; Eric knew 50 from outside, but the description wins."}
+  - {item_no: "235812", expected: {verdict: EXCEL_RIGHT, values: {standard_size: "185", standard_uom: "GM", standard_pack_size: "16"}}}
+  - {item_no: "125773", expected: {verdict: EXCEL_RIGHT, values: {standard_size: "6", standard_uom: "EA", standard_pack_size: "1"}}}
+  - {item_no: "006270", expected: {verdict: EXCEL_RIGHT, values: {standard_size: "50", standard_uom: "EA", standard_pack_size: "1"}}}
+  - {item_no: "550624", expected: {verdict: COMBINED, values: {standard_size: "55", standard_uom: "GM", standard_pack_size: "10"}}}
+  - {item_no: "587501", expected: {verdict: EXCEL_RIGHT, values: {standard_size: "70", standard_uom: "GM", standard_pack_size: "5"}}}
+  - {item_no: "389064", expected: {verdict: EXCEL_RIGHT, values: {standard_size: "116", standard_uom: "GM", standard_pack_size: "4"}}}
+  - {item_no: "292979", expected: {verdict: EXCEL_RIGHT, values: {standard_size: "1", standard_uom: "EA", standard_pack_size: "6"}}}
+  - {item_no: "374470", expected: {verdict: CANNOT_TELL}, note: "Text is silent; the 107 GM came from the pack."}
+  - {item_no: "016170", expected: {verdict: EXCEL_RIGHT, values: {standard_size: "63.4", standard_uom: "GM", standard_pack_size: "6"}}}
+  - {item_no: "062943", expected: {verdict: LEGACY_RIGHT, values: {standard_size: "100", standard_uom: "ML", standard_pack_size: "1"}}, note: "Vanilla extract is a liquid."}
+  - {item_no: "044305", expected: {verdict: CANNOT_TELL}}
+  - {item_no: "236042", expected: {verdict: DESCRIPTION_RIGHT, values: {standard_size: "227", standard_uom: "GM", standard_pack_size: "12"}}}
+  - {item_no: "163287", expected: {verdict: DESCRIPTION_RIGHT, values: {standard_size: "190", standard_uom: "GM", standard_pack_size: "3"}}}
+  - {item_no: "483677", expected: {verdict: COMBINED, values: {standard_size: "1", standard_uom: "GM", standard_pack_size: "50"}}}
+  - {item_no: "109157", expected: {verdict: COMBINED, values: {standard_size: "55", standard_uom: "GM", standard_pack_size: "6"}}}
+  - {item_no: "349910", expected: {verdict: EXCEL_RIGHT, values: {standard_size: "280", standard_uom: "GM", standard_pack_size: "12"}}}
+  - {item_no: "662056", expected: {verdict: LEGACY_RIGHT, values: {standard_size: "454", standard_uom: "GM", standard_pack_size: "1"}}, note: "OZ is not a standard unit; gherkins are a solid."}
+  - {item_no: "081190", expected: {verdict: DESCRIPTION_RIGHT, values: {standard_size: "255", standard_uom: "GM", standard_pack_size: "1"}}}
+  - {item_no: "340802", expected: {verdict: EXCEL_RIGHT, values: {standard_size: "1", standard_uom: "EA", standard_pack_size: "6"}}}

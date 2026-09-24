@@ -13,6 +13,33 @@ router = APIRouter(prefix="/jobs", tags=["review"])
 REVIEW_FIELDS = frozenset({"standard_size", "standard_uom", "standard_pack_size"})
 
 
+def _positive_decimal(value: object, *, field: str, integral: bool = False) -> str:
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        raise HTTPException(400, f"{field} must be a positive number")
+    if not number.is_finite() or number <= 0:
+        raise HTTPException(400, f"{field} must be a positive finite number")
+    if integral and number != number.to_integral_value():
+        raise HTTPException(400, f"{field} must be a positive whole number")
+    return format(number.normalize(), "f")
+
+
+def _unsafe_k_only_total_proposal(item: dict) -> bool:
+    """Protect historical jobs created before joint K/L/M reconciliation."""
+    original = item.get("original") or {}
+    proposals = item.get("field_proposals") or {}
+    if proposals.get("standard_pack_size") is not None:
+        return False
+    try:
+        original_k = Decimal(str(original.get("standard_size")))
+        original_m = Decimal(str(original.get("standard_pack_size")))
+        proposed_k = Decimal(str(proposals.get("standard_size")))
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    return original_m > 1 and proposed_k == original_k * original_m
+
+
 class BulkDecision(BaseModel):
     fields: list[str] = Field(default_factory=lambda: ["standard_size", "standard_uom"])
 
@@ -93,6 +120,12 @@ def decide_item(
         fields = {"standard_size", "standard_uom"}
     if not fields.issubset(REVIEW_FIELDS):
         raise HTTPException(400, "Unknown review field")
+    if payload.action == "APPROVE" and _unsafe_k_only_total_proposal(item):
+        raise HTTPException(
+            409,
+            "This historical proposal treats the whole-pack total as K while retaining M. "
+            "It cannot be approved; reprocess with the joint K/L/M engine or enter a complete override.",
+        )
 
     updates: dict[str, object] = {"review.comment": payload.comment}
     if payload.action == "OVERRIDE":
@@ -107,12 +140,11 @@ def decide_item(
             values["standard_uom"] = uom
         for field in ("standard_size", "standard_pack_size"):
             if field in values and values[field] is not None:
-                try:
-                    if Decimal(str(values[field])) <= 0:
-                        raise ValueError
-                except (InvalidOperation, ValueError):
-                    raise HTTPException(400, f"{field} must be a positive number")
-                values[field] = str(values[field])
+                values[field] = _positive_decimal(
+                    values[field],
+                    field=field,
+                    integral=field == "standard_pack_size",
+                )
         updates.update({
             "review.override_values": values,
             "review.overall_status": "OVERRIDDEN",

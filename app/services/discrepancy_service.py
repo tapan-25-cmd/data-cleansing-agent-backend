@@ -91,7 +91,7 @@ _CJK_NUMERALS = {
 }
 _COUNT = r"(?P<count>\d{1,3})"
 _PACK_WORDS = (
-    r"(?:['’]\s*S|PIECES?|PCS?|PACKS?|PKS?|CUPS?|CANS?|BOTTLES?|BTLS?|SACHETS?|STICKS?|BAGS?|CT)"
+    r"(?:['’]\s*S|PIECES?|PCS?|PACKS?|PKS?|CUPS?|CANS?|BOTTLES?|BTLS?|SACHETS?|STICKS?|BAGS?|CT|EA)"
     + _LATIN_END
 )
 _COUNT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (

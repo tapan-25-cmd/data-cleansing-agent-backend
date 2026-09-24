@@ -34,6 +34,16 @@ MeasurementRole: TypeAlias = Literal[
     "UNCLEAR",
 ]
 PackRole: TypeAlias = Literal["SELLABLE_PACK", "CONTENTS", "OUTER_CASE", "UNCLEAR"]
+PairName: TypeAlias = Literal["ITEM_DESCRIPTION", "WEB_DESCRIPTION"]
+PairStatus: TypeAlias = Literal["SUPPORTED", "INSUFFICIENT", "CONFLICT", "AMBIGUOUS"]
+RelationshipType: TypeAlias = Literal[
+    "AMOUNT_PER_UNIT",
+    "UNITS_PER_PACK",
+    "INNER_PACKS_PER_CASE",
+    "STATED_TOTAL",
+    "CONTAINS",
+    "ALTERNATIVE",
+]
 PRODUCT_SIZE_ROLES = frozenset({"NET_CONTENT_UNIT", "NET_CONTENT_TOTAL"})
 
 _REASON_FOR_STATUS = {
@@ -75,7 +85,9 @@ class InferenceProviderError(RuntimeError):
 
 
 class InvalidInferenceResponseError(InferenceProviderError):
-    pass
+    def __init__(self, message: str, *, validation_errors: list[str] | None = None):
+        super().__init__(message)
+        self.validation_errors = tuple(validation_errors or [message])
 
 
 class InferenceRequest(BaseModel):
@@ -96,6 +108,11 @@ class InferenceRequest(BaseModel):
     category: str | None = None
     subcategory: str | None = None
     section: str | None = None
+    # Provider-owned retry context. It is never workbook evidence and is absent
+    # from normal requests. ADK input validation requires retry instructions to
+    # remain inside this typed request rather than being prepended as free text.
+    repair_attempt: Literal[2] | None = None
+    repair_validation_error: str | None = Field(default=None, max_length=1000)
 
 
 class Evidence(BaseModel):
@@ -130,6 +147,47 @@ class ObservedMeasurement(BaseModel):
         return self.role is None or self.role in PRODUCT_SIZE_ROLES
 
 
+class PairInterpretation(BaseModel):
+    """Meaning supported by one bilingual description pair.
+
+    A silent language is not a conflict. CONFLICT is valid only when the two
+    members of this same pair make incompatible claims about the same role.
+    """
+
+    pair: PairName
+    status: PairStatus
+    product_meaning: str | None = Field(default=None, max_length=240)
+    evidence: list[Evidence] = Field(default_factory=list)
+    conclusion: str = Field(min_length=1, max_length=400)
+
+
+class QuantityRelationship(BaseModel):
+    relationship: RelationshipType
+    subject: str = Field(min_length=1, max_length=120)
+    amount: Decimal | None = None
+    uom: str | None = Field(default=None, max_length=20)
+    count: Decimal | None = None
+    evidence: list[Evidence] = Field(default_factory=list)
+
+    @field_validator("uom")
+    @classmethod
+    def normalize_optional_uom(cls, value: str | None) -> str | None:
+        return value.strip().upper() if value else None
+
+    @model_validator(mode="after")
+    def require_grounded_quantity(self) -> "QuantityRelationship":
+        if self.amount is None and self.count is None:
+            raise ValueError("relationship requires an amount or count")
+        for value in (self.amount, self.count):
+            if value is not None and (not value.is_finite() or value <= 0):
+                raise ValueError("relationship quantities must be positive and finite")
+        if self.amount is not None and not self.uom:
+            raise ValueError("relationship amount requires a UOM")
+        if not self.evidence:
+            raise ValueError("relationship requires literal evidence")
+        return self
+
+
 class InferenceResult(BaseModel):
     status: Literal["PROPOSAL", "PACK_PROPOSAL", "NOT_IN_DESCRIPTION", "AMBIGUOUS", "CONFLICT"]
     measurement: ObservedMeasurement | None = None
@@ -146,6 +204,9 @@ class InferenceResult(BaseModel):
     confidence: Literal["HIGH", "MEDIUM", "LOW"] = "LOW"
     # Fully determined by status, so the model no longer has to supply it.
     reason_code: AgentReasonCode | None = None
+    # v4 interpretation audit. Optional defaults preserve stored v3 responses.
+    pair_interpretations: list[PairInterpretation] = Field(default_factory=list)
+    quantity_relationships: list[QuantityRelationship] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_status_shape(self) -> "InferenceResult":
@@ -202,6 +263,9 @@ class ProviderMetadata(BaseModel):
     session_id: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    # Empty for a first-pass success. Populated after a malformed first answer
+    # is repaired successfully by the single bounded schema-repair retry.
+    validation_errors: list[str] = Field(default_factory=list)
 
 
 class InferenceResponse(BaseModel):
@@ -222,6 +286,10 @@ def validate_evidence(request: InferenceRequest, result: InferenceResult) -> Non
         evidence_items.append(result.pack_evidence)
     evidence_items.extend(result.conflicting_measurements)
     evidence_items.extend(result.other_measurements)
+    for pair in result.pair_interpretations:
+        evidence_items.extend(pair.evidence)
+    for relationship in result.quantity_relationships:
+        evidence_items.extend(relationship.evidence)
     for evidence in evidence_items:
         if evidence.field not in ALLOWED_EVIDENCE_FIELDS:
             raise ValueError(f"forbidden evidence field: {evidence.field}")

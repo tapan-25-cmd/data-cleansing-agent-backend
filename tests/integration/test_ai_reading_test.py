@@ -105,7 +105,12 @@ def test_the_ai_sees_description_text_only_and_is_scored_in_two_parts():
     runner.run("j1", selected)
 
     # Blindness: the request type has no field for entered or legacy values.
+    # The provider-owned schema-repair fields stay None on a first pass and are
+    # dropped from the JSON the model receives (exclude_none), so they are not
+    # part of what the AI sees.
     sent = provider.requests[0].model_dump()
+    assert sent.pop("repair_attempt") is None
+    assert sent.pop("repair_validation_error") is None
     assert set(sent) == {
         "task", "known_measurement", "item_brand_eng", "item_brand_local_lang",
         "item_desc_eng", "item_desc_local_lang", "web_description_eng", "web_description_chi",
