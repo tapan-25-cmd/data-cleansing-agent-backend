@@ -6,7 +6,7 @@ from app.services.rule_engine import RuleEngine
 
 def item(**changes):
     base = {
-        "row_number": 17360, "item_no": "550624", "group": "A",
+        "row_number": 17360, "item_no": "550624", "route": "A",
         "context": {"item_desc_eng": "TY SHRIMP CR NDL\\10", "item_desc_local_lang": "冬蔭蝦味奶油湯麵"},
         "original": {"legacy_size": "55", "legacy_uom": "GM", "standard_size": 550, "standard_uom": "GM", "standard_pack_size": 1},
         "field_proposals": {"standard_size": "55", "standard_uom": "GM", "standard_pack_size": "10"},
@@ -27,7 +27,7 @@ def service():
 def test_catalogue_loads_and_every_category_has_a_group():
     catalogue = load_catalogue()
     groups = {g["id"] for g in catalogue["groups"]}
-    assert catalogue["version"] == "open-questions-v1"
+    assert catalogue["version"] == "open-questions-v2"
     assert all(c["group"] in groups for c in catalogue["categories"])
 
 
@@ -39,10 +39,21 @@ def test_first_matching_category_wins_and_correct_rows_are_left_out():
     assert categorize(ea, "REVIEW_REQUIRED") == "legacy_counts_differently"
     assert categorize(item(findings=[{"code": "DESCRIPTION_MEASUREMENT_MISMATCH"}]), "OBSERVATION_ONLY") == "number_not_a_size"
     assert categorize(item(findings=[{"code": "DESCRIPTION_MEASUREMENT_MISMATCH"}]), "REVIEW_REQUIRED") == "description_size_differs"
-    assert categorize(item(group="B", reason_code="RULE_CONVERSION", findings=[]), "AUTO_APPLY") == "converted_by_rule"
+    assert categorize(item(route="B", reason_code="RULE_CONVERSION", findings=[]), "AUTO_APPLY") == "converted_by_rule"
     assert categorize(item(findings=[]), "NO_CHANGE") is None
     assert categorize(item(findings=[]), "SKIPPED") is None
     assert categorize(item(findings=[{"code": "SOMETHING_NEW"}]), "REVIEW_REQUIRED") == "other_review"
+
+
+def test_half_filled_rows_and_unusable_values_have_their_own_questions():
+    assert categorize(item(findings=[{"code": "DESCRIPTION_SIZE_DIFFERS"}]), "REVIEW_REQUIRED") == "description_size_differs"
+    partly = [{"code": "PARTLY_FILLED_ROW"}]
+    assert categorize(item(route="INCOMPLETE", findings=[*partly, {"code": "GAP_NOT_FOUND"}]), "REVIEW_REQUIRED") == "half_filled_not_found"
+    assert categorize(item(route="INCOMPLETE", findings=[*partly, {"code": "GAP_SUGGESTED"}]), "REVIEW_REQUIRED") == "half_filled_suggested"
+    assert categorize(item(route="INCOMPLETE", findings=[*partly, {"code": "UNUSABLE_VALUE"}]), "REVIEW_REQUIRED") == "unusable_value"
+    assert categorize(item(route="INCOMPLETE", reason_code="PARTLY_FILLED_ROW", findings=partly), "AUTO_APPLY") == "half_filled_completed"
+    # Every row the tool cannot use is listed, even with no finding the catalogue names.
+    assert categorize(item(route="DATA_SHAPE_ERROR", findings=[{"code": "INVALID_STANDARD_SIZE"}]), "INVALID") == "other_invalid"
 
 
 def test_rows_carry_descriptions_legacy_excel_suggestion_and_options():
@@ -50,6 +61,8 @@ def test_rows_carry_descriptions_legacy_excel_suggestion_and_options():
     (row,) = report["rows"]
     assert row["category"] == "same_total_different_split"
     assert row["status_label"] == "Needs your review"
+    assert (row["group"], row["group_name"], row["route"], row["route_label"]) == (
+        "C", "Raised for a person", "A", "Checked existing values")
     assert row["legacy"] == {"text": "55 GM", "converted": "55 GM", "converted_size": "55", "converted_uom": "GM"}
     assert row["excel"]["total"] == "550" and row["suggestion"]["total"] == "550"
     assert [o["label"] for o in row["options"]] == ["Keep Excel as uploaded", "Use the suggestion"]

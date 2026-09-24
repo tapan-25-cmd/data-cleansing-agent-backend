@@ -5,7 +5,7 @@ from app.services.rule_engine import RuleEngine
 
 
 def row(n, legacy_size, legacy_uom, size, uom, pack=1, text="FILLER"):
-    return {"row_number": n, "item_no": f"{n:06d}", "group": "A", "department": "03_Grocery 2",
+    return {"row_number": n, "item_no": f"{n:06d}", "route": "A", "department": "03_Grocery 2",
             "context": {"item_desc_eng": text, "category": "Noodles"},
             "original": {"legacy_size": legacy_size, "legacy_uom": legacy_uom, "standard_size": size, "standard_uom": uom, "standard_pack_size": pack},
             "field_proposals": {"standard_size": None, "standard_uom": None, "standard_pack_size": None},

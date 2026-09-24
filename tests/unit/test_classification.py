@@ -25,8 +25,14 @@ def test_group_c_has_no_legacy_uom():
     assert classify(product(item_desc_eng="GREEN TEA")) == WorkGroup.C
 
 
-def test_unexpected_shape_is_error():
-    assert classify(product(standard_size="500")) == WorkGroup.DATA_SHAPE_ERROR
+def test_a_half_filled_row_is_completed_not_rejected():
+    assert classify(product(standard_size="500")) == WorkGroup.INCOMPLETE
+    assert classify(product(standard_uom="GM")) == WorkGroup.INCOMPLETE
+    assert classify(product(standard_size="500", standard_uom="GM")) == WorkGroup.INCOMPLETE
+    # With neither size nor unit, the row is read like any blank one: from the old
+    # size when there is one, otherwise from the description.
+    assert classify(product(standard_pack_size="6", legacy_uom="G")) == WorkGroup.B
+    assert classify(product(standard_pack_size="6")) == WorkGroup.C
 
 
 def test_purge_wins_before_classification():

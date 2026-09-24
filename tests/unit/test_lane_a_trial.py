@@ -9,7 +9,7 @@ from app.services.lane_a_trial_service import build_request, category_kind, load
 
 def item(**changes):
     base = {
-        "row_number": 17360, "item_no": "550624", "group": "A",
+        "row_number": 17360, "item_no": "550624", "route": "A",
         "context": {"item_desc_eng": "TY SHRIMP CR NDL\\10", "item_desc_local_lang": "冬蔭蝦味奶油湯麵", "web_description_eng": "TY SHRIMP CR NDL\\10"},
         "original": {"legacy_size": "55", "legacy_uom": "GM", "standard_size": 550, "standard_uom": "GM", "standard_pack_size": 1},
         "field_proposals": {"standard_size": "55", "standard_uom": "GM", "standard_pack_size": "10"},

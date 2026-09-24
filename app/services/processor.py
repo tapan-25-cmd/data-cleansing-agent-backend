@@ -26,7 +26,7 @@ from app.services.discrepancy_service import (
     DiscrepancyReport,
     analyze_discrepancies,
 )
-from app.services.excel_reader import ExcelReader, WorkbookRow
+from app.services.excel_reader import FIELD_MAP, ExcelReader, WorkbookRow
 from app.services.group_a_validator import (
     GROUP_A_VALIDATION_VERSION,
     STANDARD_UOM_ALIAS_CHECKSUM,
@@ -46,25 +46,31 @@ from app.services.purge_detector import is_purged
 from app.services.quality_service import QualityService
 from app.services.rule_engine import RuleEngine
 from app.services.result_ledger_service import enrich_result_item
+from app.services.result_status import GROUPS, outcome_group
+from app.services.gap_fill_service import GapFillService
 from app.storage.local import LocalFileStorage
 
 logger = logging.getLogger(__name__)
 
 
 EXPECTED_V02 = {
+    # The route counts: which method the tool used on each row. They check the file's
+    # shape against the PRD baseline. The outcome groups (A/B/C) are reported beside
+    # them and are not part of this check, because they depend on what the tool finds.
     "workbook_rows": 66082,
     "department_rows": 13300,
     "purged": 758,
     "live": 12542,
     # Five formerly trusted A rows now route to review because their explicit
     # case hierarchy conflicts with existing K/L/M (2 KIKI + 3 yoghurt rows).
-    "group_a": 11970,
-    "group_b": 512,
-    "group_b1": 304,
-    "group_b2": 170,
-    "group_b3": 38,
-    "group_c": 55,
+    "route_a": 11970,
+    "route_b": 512,
+    "route_b1": 304,
+    "route_b2": 170,
+    "route_b3": 38,
+    "route_c": 55,
     "validation_review": 5,
+    "route_incomplete": 0,
     "data_shape_error": 0,
 }
 
@@ -201,6 +207,7 @@ class JobProcessor:
         self.rule_engine = RuleEngine(registry, default_rounding_decimals)
         self.group_a_validator = GroupAValidator(self.group_b_rule_engine)
         self.pack_size_service = PackSizeService()
+        self.gap_filler = GapFillService(self.group_b_rule_engine, registry)
         self.quality_service = QualityService(registry)
         self.ai_max_concurrency = ai_max_concurrency
         self.pack_size_inference_enabled = pack_size_inference_enabled
@@ -293,9 +300,9 @@ class JobProcessor:
                 counts["purged"] += 1
             else:
                 counts["live"] += 1
-            counts[f"group_{group.value.lower()}"] += 1
+            counts[f"route_{group.value.lower()}"] += 1
             if validation and validation.has_warnings and group == WorkGroup.A:
-                counts["group_a_validation_warnings"] += 1
+                counts["route_a_validation_warnings"] += 1
             item = self._base_item(job_id, workbook_row, group, validation, discrepancies)
 
             if group == WorkGroup.B:
@@ -303,7 +310,7 @@ class JobProcessor:
                     subtype = "B3"
                 else:
                     subtype = "B2" if product.standard_size is None and product.standard_uom is None else "B1"
-                counts[f"group_{subtype.lower()}"] += 1
+                counts[f"route_{subtype.lower()}"] += 1
                 if subtype == "B3":
                     normalized = validation.normalization_proposal()
                     size_requires_fix = any(
@@ -417,7 +424,7 @@ class JobProcessor:
                     job_id=job_id,
                     item_no=product.item_no,
                     row_number=workbook_row.row_number,
-                    group=group.value,
+                    route=group.value,
                     source_uom=(
                         product.raw_standard_uom if subtype == "B3" else product.legacy_uom
                     ),
@@ -440,8 +447,10 @@ class JobProcessor:
                     job_id=job_id,
                     item_no=product.item_no,
                     row_number=workbook_row.row_number,
-                    group=group.value,
+                    route=group.value,
                 )
+            elif group == WorkGroup.INCOMPLETE:
+                self._complete_partial_row(item, workbook_row, discrepancies)
             elif group == WorkGroup.VALIDATION_REVIEW:
                 item["reason_code"] = "GROUP_A_VALIDATION_REVIEW"
                 item["review"] = self._pending_review(size_uom=True, pack=True)
@@ -486,22 +495,27 @@ class JobProcessor:
             counts[f"pack_{status}"] += 1
             if pack_result.get("invalid_existing"):
                 counts["pack_invalid_existing"] += 1
-            if item["group"] in {WorkGroup.B.value, WorkGroup.C.value}:
-                counts[f"group_{item['group'].lower()}_pack_{status}"] += 1
+            if item["route"] in {WorkGroup.B.value, WorkGroup.C.value}:
+                counts[f"route_{item['route'].lower()}_pack_{status}"] += 1
+            counts[f"outcome_{outcome_group(item).lower()}"] += 1
         stats = {
             "workbook_rows": counts["workbook_rows"],
             "department_rows": counts["department_rows"],
             "purged": counts["purged"],
             "live": counts["live"],
-            "group_a": counts["group_a"],
-            "group_b": counts["group_b"],
-            "group_b1": counts["group_b1"],
-            "group_b2": counts["group_b2"],
-            "group_b3": counts["group_b3"],
-            "group_c": counts["group_c"],
-            "validation_review": counts["group_validation_review"],
-            "group_a_validation_warnings": counts["group_a_validation_warnings"],
-            "data_shape_error": counts["group_data_shape_error"],
+            # The outcome groups, decided from each row's final status.
+            "groups": {group: counts[f"outcome_{group.lower()}"] for group in GROUPS},
+            # The routes: which method the tool used on each row.
+            "route_a": counts["route_a"],
+            "route_b": counts["route_b"],
+            "route_b1": counts["route_b1"],
+            "route_b2": counts["route_b2"],
+            "route_b3": counts["route_b3"],
+            "route_c": counts["route_c"],
+            "route_incomplete": counts["route_incomplete"],
+            "validation_review": counts["route_validation_review"],
+            "route_a_validation_warnings": counts["route_a_validation_warnings"],
+            "data_shape_error": counts["route_data_shape_error"],
             "discrepancies": discrepancies,
             "discrepancy_bilingual_measurement_conflicts": counts["discrepancy_bilingual_pair_measurement"],
             "discrepancy_bilingual_count_conflicts": counts["discrepancy_bilingual_pair_count"],
@@ -515,10 +529,10 @@ class JobProcessor:
             "pack_agent_error": counts["pack_agent_error"],
             "pack_agent_disabled": counts["pack_agent_disabled"],
             "pack_invalid_existing": counts["pack_invalid_existing"],
-            "group_b_pack_deterministic_proposed": counts["group_b_pack_deterministic_proposal"],
-            "group_b_pack_agent_proposed": counts["group_b_pack_agent_proposal"],
-            "group_c_pack_deterministic_proposed": counts["group_c_pack_deterministic_proposal"],
-            "group_c_pack_agent_proposed": counts["group_c_pack_agent_proposal"],
+            "route_b_pack_deterministic_proposed": counts["route_b_pack_deterministic_proposal"],
+            "route_b_pack_agent_proposed": counts["route_b_pack_agent_proposal"],
+            "route_c_pack_deterministic_proposed": counts["route_c_pack_deterministic_proposal"],
+            "route_c_pack_agent_proposed": counts["route_c_pack_agent_proposal"],
         }
         if job.get("snapshot_label") == "v0.2":
             differences = {key: (stats[key], expected) for key, expected in EXPECTED_V02.items() if stats[key] != expected}
@@ -584,7 +598,7 @@ class JobProcessor:
             "row_number": row.row_number,
             "item_no": row.product.item_no,
             "department": row.product.department,
-            "group": group.value,
+            "route": group.value,
             "context": _context(row.product),
             "original": _original(row.product),
             "field_proposals": {"standard_size": None, "standard_uom": None, "standard_pack_size": None},
@@ -607,6 +621,37 @@ class JobProcessor:
             ),
             "review": self._not_required_review(),
         }
+
+    def _complete_partial_row(
+        self, item: dict[str, Any], row: WorkbookRow, discrepancies: DiscrepancyReport | None,
+    ) -> None:
+        """Some of size, unit and pack are filled. Keep them, complete the rest from the old
+        size or the description, then run the usual checks on the completed values."""
+        product = row.product
+        assessment = self.pack_size_service.assess(product)
+        item["pack_result"] = assessment.as_dict()
+        fill = self.gap_filler.fill(product, assessment)
+        item["field_proposals"].update(fill.proposals)
+        item["field_provenance"].update(fill.provenance)
+        item["guards"].extend(fill.issues)
+        item["reason_code"] = "PARTLY_FILLED_ROW"
+        if fill.proposals:
+            item["method"] = ProposalMethod.RULE.value
+        if fill.check_values is not None:
+            size, unit, pack = fill.check_values
+            completed = product.model_copy(update={
+                "standard_size": size, "standard_uom": unit, "standard_pack_size": pack,
+                "raw_standard_size": size, "raw_standard_uom": unit, "raw_standard_pack_size": pack,
+            })
+            raw = dict(row.raw)
+            raw.update({FIELD_MAP["standard_size"]: size, FIELD_MAP["standard_uom"]: unit,
+                        FIELD_MAP["standard_pack_size"]: pack})
+            checked = self.group_a_validator.validate(
+                WorkbookRow(row_number=row.row_number, raw=raw, product=completed),
+                discrepancies=discrepancies,
+            )
+            if checked is not None:
+                item["validation"] = checked.as_dict()
 
     def _record_usage(self, response: Any) -> None:
         self.ai_usage["calls"] += 1
@@ -685,7 +730,7 @@ class JobProcessor:
                     job_id=items[index]["job_id"],
                     item_no=product.item_no,
                     row_number=items[index]["row_number"],
-                    group=items[index]["group"],
+                    route=items[index]["route"],
                 )
                 async with semaphore:
                     response = await self.inference_provider.infer(request)
@@ -799,7 +844,7 @@ class JobProcessor:
                     job_id=items[index]["job_id"],
                     item_no=product.item_no,
                     row_number=items[index]["row_number"],
-                    group=items[index]["group"],
+                    route=items[index]["route"],
                 )
                 async with semaphore:
                     response = await self.inference_provider.infer(request)
@@ -914,7 +959,7 @@ class JobProcessor:
                     job_id=item["job_id"],
                     item_no=product.item_no,
                     row_number=item["row_number"],
-                    group=item["group"],
+                    route=item["route"],
                     status=result.status,
                     reason_code=item["reason_code"],
                     model_id=response.metadata.model_id,

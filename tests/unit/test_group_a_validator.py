@@ -56,7 +56,7 @@ def test_canonical_positive_numeric_fields_are_valid_and_preserved():
     assert result.status == GroupAValidationStatus.VALID
     assert result.standard_size == Decimal("500.5")
     assert result.normalization_proposal()["standard_size"] == "500.5"
-    assert result.as_dict()["policy_version"] == "group-a-validation-v5"
+    assert result.as_dict()["policy_version"] == "group-a-validation-v6"
     assert len(result.as_dict()["alias_checksum"]) == 64
 
 
@@ -283,8 +283,10 @@ def test_local_language_measurement_is_checked_against_existing_values():
     ))
 
     assert result.status == GroupAValidationStatus.VALID
-    mismatch = next(i for i in result.issues if i.code == "DESCRIPTION_MEASUREMENT_MISMATCH")
-    assert (mismatch.field, mismatch.current_value) == ("web_description_chi", "720克")
+    # 720 grams is the same kind of unit as Excel's 540 GM, so it is a different size
+    # stated in the description, which a person confirms.
+    differs = next(i for i in result.issues if i.code == "DESCRIPTION_SIZE_DIFFERS")
+    assert (differs.field, differs.current_value, differs.expected_value) == ("web_description_chi", "720克", "540 GM")
 
 
 def test_pack_count_conflict_does_not_reclassify_group_a():

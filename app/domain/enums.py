@@ -9,6 +9,9 @@ class WorkGroup(str, Enum):
     OUT_OF_SCOPE = "OUT_OF_SCOPE"
     VALIDATION_REVIEW = "VALIDATION_REVIEW"
     DATA_SHAPE_ERROR = "DATA_SHAPE_ERROR"
+    # Some of size, unit and pack are filled but not all three: the tool completes the
+    # row from the old size or the description, or asks a person.
+    INCOMPLETE = "INCOMPLETE"
 
 
 class ProposalMethod(str, Enum):

@@ -26,7 +26,7 @@ def _report(request: Request, repos: MongoRepositories, job: dict) -> dict:
     attention are read, so this takes seconds, not minutes."""
     cache: dict = getattr(request.app.state, "open_questions_cache", None) or {}
     request.app.state.open_questions_cache = cache
-    key = (job["job_id"], str(job.get("updated_at")))
+    key = (job["job_id"], str(job.get("updated_at")), load_catalogue()["version"])
     if key not in cache:
         cache.clear()
         service = OpenQuestionsService(RuleEngine(request.app.state.registry, 0))

@@ -23,7 +23,7 @@ class FakeRepositories:
     def quality_items(self, job_id):
         self.item_reads += 1
         return [{
-            "item_no": "044305", "row_number": 2, "group": "A",
+            "item_no": "044305", "row_number": 2, "route": "A",
             "original": {"legacy_size": "12.3", "legacy_uom": "OZ", "standard_size": "375",
                          "standard_uom": "GM", "standard_pack_size": "1"},
             "context": {"item_desc_eng": "COOKIES"}, "findings": [],
@@ -33,7 +33,7 @@ class FakeRepositories:
     def comparison_items(self, job_id):
         past = job_id == "past"
         return [{
-            "item_no": "587501", "row_number": 3, "group": "A",
+            "item_no": "587501", "row_number": 3, "route": "A",
             "context": {"item_desc_eng": "DRIED NOODLE"},
             "original": {
                 "legacy_size": "350", "legacy_uom": "GM", "standard_size": "70",

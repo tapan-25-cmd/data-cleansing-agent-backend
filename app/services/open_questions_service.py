@@ -15,7 +15,7 @@ import yaml
 
 from app.services.export_service import row_comment
 from app.services.job_comparison_service import FIELDS, _values, describe, outcome
-from app.services.result_status import GROUP_LABELS, STATUS_LABELS, effective_status
+from app.services.result_status import GROUP_LABELS, GROUP_NAMES, GROUP_OF_STATUS, STATUS_LABELS, effective_status, route_label, route_of
 from app.services.rule_engine import RuleEngine
 
 OPEN_QUESTIONS_PATH = Path(__file__).resolve().parents[1] / "evaluations" / "open_questions.v1.yaml"
@@ -118,12 +118,15 @@ def build_row(item: dict[str, Any], engine: RuleEngine) -> dict[str, Any] | None
                 "label": "Legacy value as converted", "values": reading,
                 "text": describe(reading), "source": "LEGACY",
             })
-    group = str(item.get("group") or "")
+    group = GROUP_OF_STATUS[status]
     return {
         "row_number": item.get("row_number"),
         "item_no": str(item.get("item_no") or ""),
         "group": group,
-        "group_label": GROUP_LABELS.get(group, group),
+        "group_label": GROUP_LABELS[group],
+        "group_name": GROUP_NAMES[group],
+        "route": route_of(item),
+        "route_label": route_label(item),
         "category": category,
         "status": status,
         "status_label": STATUS_LABELS.get(status, status),

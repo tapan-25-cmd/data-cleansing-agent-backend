@@ -39,6 +39,7 @@ from app.services.discrepancy_service import (
 from app.services.pack_size_service import PackSizeService, PackStatus
 from app.services.result_status import effective_status
 from app.services.rule_engine import RuleEngine
+from app.services.routes import route_of
 
 
 QUALITY_REPORT_VERSION = "quality-report-v5"
@@ -165,7 +166,7 @@ def text_states(item: dict[str, Any], size: Decimal | None, uom: str, pack: Deci
 
 def is_ai_reading_eligible(item: dict[str, Any]) -> bool:
     """An already-completed product whose description states a size in words."""
-    if item.get("group") != "A":
+    if route_of(item) != "A":
         return False
     blind = BlindInput.from_item(item)
     return any(
@@ -195,7 +196,7 @@ RESULT_KINDS: tuple[tuple[str, str, str, bool], ...] = (
 
 def result_kinds(item: dict[str, Any]) -> list[str]:
     """Every kind of result the agent produced for one product."""
-    group = item.get("group")
+    group = route_of(item)
     proposals = item.get("field_proposals") or {}
     original = item.get("original") or {}
     has_size = proposals.get("standard_size") is not None or proposals.get("standard_uom") is not None
@@ -348,7 +349,7 @@ class QualityService:
                 count(f"finding:{code}", item)
             if item.get("reason_code"):
                 count(f"reason:{item['reason_code']}", item)
-            group = item.get("group")
+            group = route_of(item)
             pack_status = (item.get("pack_result") or {}).get("status")
             if group == "B" and pack_status in {"AGENT_PROPOSAL", "AGENT_DECLINED", "AGENT_ERROR", "AGENT_DISABLED"}:
                 count("pack_clue_needs_policy", item)
@@ -707,7 +708,7 @@ class QualityService:
     def _workload(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         buckets: Counter[str] = Counter()
         for item in items:
-            if item.get("group") == "SKIPPED_PURGED":
+            if route_of(item) == "SKIPPED_PURGED":
                 buckets["SKIPPED"] += 1
                 continue
             review = (item.get("review") or {}).get("overall_status")

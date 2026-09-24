@@ -13,7 +13,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from app.domain.enums import BASE_UNITS
 from app.repositories.mongo import MongoRepositories
 from app.services.excel_reader import FIELD_MAP, INPUT_SHEET
-from app.services.result_status import STATUS_LABELS, effective_status, group_label
+from app.services.result_status import STATUS_LABELS, differs, effective_status, group_label, how_label, route_of
 from app.storage.local import LocalFileStorage
 
 logger = logging.getLogger(__name__)
@@ -71,8 +71,9 @@ def _restore_namespace_declarations(
     return worksheet_xml[: root.start()] + patched + worksheet_xml[root.end() :]
 
 AUDIT_COLUMNS = (
-    # What kind of row, what happened to it, and why: read left to right.
+    # The outcome, how it came about, what happened, and why: read left to right.
     "Group",
+    "How",
     "Cleansing Status",
     "Comment",
     "Cleansing Changed Fields",
@@ -122,7 +123,7 @@ STYLES_PATH = "xl/styles.xml"
 # we write. A job that was exported under an older version rebuilds on the next request
 # instead of handing back a stale file, which is how a fixed export used to stay
 # invisible to anyone who had already downloaded once.
-EXPORT_VERSION = "export-v4"
+EXPORT_VERSION = "export-v6"
 
 
 def _log_event(event: str, **fields: object) -> None:
@@ -312,10 +313,15 @@ def _finding_comment(finding: dict[str, object], original: dict[str, object]) ->
             f"{legacy}{f', which is {kind}' if kind else ''}. These measure different "
             "things, so confirm which one applies."
         )
-    if code == "DESCRIPTION_MEASUREMENT_MISMATCH" and current:
+    if code == "DESCRIPTION_SIZE_DIFFERS" and current:
         return (
             f"{source.capitalize()} says “{current}”, but Excel says {expected or uom}. "
-            "Check the pack and correct whichever is wrong."
+            "Nothing was changed. Confirm which size is right."
+        )
+    if code == "DESCRIPTION_MEASUREMENT_MISMATCH" and current:
+        return (
+            f"{source.capitalize()} has “{current}”, a different kind of unit from Excel's "
+            f"{expected or uom}; it is most likely part of the name. Nothing was changed."
         )
     if code == "PACKAGING_HIERARCHY_AMBIGUOUS":
         wording = _FRAGMENT.search(current)
@@ -389,10 +395,11 @@ def _outcome_comment(item: dict[str, object], status: str, original: dict[str, o
         )
     if status == "INVALID":
         return (
-            "This row is incomplete: it has some of the standardised values but not all three, "
-            "so it could be neither checked nor filled in. Please complete or clear the row."
+            "A value in this row cannot be used (for example text where a number should be, "
+            "or a unit that is not in the table), so it could be neither checked nor filled in. "
+            "Please correct the value."
         )
-    if status == "UNRESOLVED" and str(item.get("group")) == "B":
+    if status == "UNRESOLVED" and route_of(item) == "B":
         unit = original.get("legacy_uom") or "the legacy unit"
         return (
             f"The legacy unit {unit} has no agreed conversion, so the size could not be "
@@ -404,7 +411,8 @@ def _outcome_comment(item: dict[str, object], status: str, original: dict[str, o
     method = str(item.get("method") or "")
     source = (
         "the product description" if "AI_INFERENCE" in method
-        else f"the legacy data ({legacy})" if legacy
+        else f"the legacy data ({legacy})" if legacy and route_of(item) == "B"
+        else how_label(item).lower() if route_of(item) == "INCOMPLETE"
         else "the existing values"
     )
     moves = [
@@ -415,10 +423,15 @@ def _outcome_comment(item: dict[str, object], status: str, original: dict[str, o
         for change in [next(
             (row for row in list(item.get("changes") or []) if row.get("field") == field), {},
         )]
-        if change.get("proposed") is not None
+        if change.get("proposed") is not None and differs(change.get("proposed"), change.get("original"))
     ]
     if not moves:
         return ""
+    if route_of(item) == "INCOMPLETE":
+        return f"Filled in the missing values ({source}): " + ", ".join(moves) + "."
+    if route_of(item) == "B" and original.get("standard_size") not in (None, "") and "AI_INFERENCE" not in method:
+        # Excel's own value was converted to a standard unit (16 OZ → 454 GM).
+        return "Converted to a standard unit with the unit table: " + ", ".join(moves) + "."
     return f"Corrected from {source}: " + ", ".join(moves) + "."
 
 
@@ -468,10 +481,11 @@ def _audit_values(item: dict[str, object]) -> tuple[str, ...]:
     m = values("standard_pack_size")
     changed_fields = [
         field for field, change in changes.items()
-        if change.get("proposed") is not None
+        if change.get("proposed") is not None and differs(change.get("proposed"), change.get("original"))
     ]
     return (
         group_label(item),
+        how_label(item),
         STATUS_LABELS.get(status, status),
         _comment(item),
         "; ".join(changed_fields),

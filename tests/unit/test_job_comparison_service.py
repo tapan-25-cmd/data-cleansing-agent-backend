@@ -11,7 +11,7 @@ from app.services.job_comparison_service import (
 
 def row(**changes):
     item = {
-        "row_number": 10, "item_no": "587501", "group": "A",
+        "row_number": 10, "item_no": "587501", "route": "A",
         "context": {"item_desc_eng": "DRIED NOODLE", "item_desc_local_lang": "優質光身麵"},
         "original": {
             "legacy_size": "350", "legacy_uom": "GM",
@@ -47,8 +47,11 @@ def test_a_review_that_became_a_note_is_reported_as_cleared_with_both_comments()
         "by_change": {"SAME": 0, "REVIEW_CLEARED": 1, "NOW_AUTOMATIC": 0, "VALUES_CHANGED": 0,
                       "SUGGESTION_CHANGED": 0, "NEW_REVIEW": 0, "NOW_UNRESOLVED": 0, "NOTE_CHANGED": 0},
         "past_status": {"REVIEW_REQUIRED": 1}, "new_status": {"OBSERVATION_ONLY": 1},
+        # Raised in the past run, kept with a note now: the row moved from C to A.
+        "past_group": {"C": 1}, "new_group": {"A": 1},
     }
     (line,) = report["rows"]
+    assert (line["past_group"], line["group"], line["route"]) == ("C", "A", "A")
     assert line["change_label"] == "No longer needs review"
     assert line["past"]["status_label"] == "Needs your review"
     assert line["past"]["suggestion"]["total"] == "1750"          # what approving it would have done
@@ -61,14 +64,14 @@ def test_a_review_that_became_a_note_is_reported_as_cleared_with_both_comments()
 
 def test_identical_rows_are_same_and_purged_rows_are_left_out():
     same = row()
-    purged = row(row_number=11, group="SKIPPED_PURGED")
+    purged = row(row_number=11, route="SKIPPED_PURGED")
     report = JobComparisonService().build([same, purged], [same, purged])
     assert report["summary"]["rows_compared"] == 1
     assert report["rows"][0]["change"] == "SAME"
 
 
 def test_final_values_follow_automatic_corrections_and_review_decisions():
-    auto = outcome(row(group="B", application_policy="AUTO_APPLY", reason_code="RULE_CONVERSION",
+    auto = outcome(row(route="B", application_policy="AUTO_APPLY", reason_code="RULE_CONVERSION",
                        original={"legacy_size": "1", "legacy_uom": "KG", "standard_size": None, "standard_uom": None, "standard_pack_size": None},
                        field_proposals={"standard_size": "1000", "standard_uom": "GM", "standard_pack_size": None},
                        changes=[{"field": "standard_size", "original": None, "proposed": "1000"}], method="RULE"))

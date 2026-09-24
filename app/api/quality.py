@@ -16,7 +16,7 @@ from app.services.quality_service import (
     QualityService,
     load_business_decisions,
 )
-from app.services.job_comparison_service import JobComparisonService
+from app.services.job_comparison_service import JOB_COMPARISON_VERSION, JobComparisonService
 
 router = APIRouter(prefix="/jobs", tags=["quality"])
 _READY = frozenset({
@@ -110,6 +110,7 @@ def past_new_comparison(
     stored = repos.job_comparison(past["job_id"], job["job_id"])
     fresh = bool(stored) and (
         stored.get("past_updated_at") == _stamp(past) and stored.get("new_updated_at") == _stamp(job)
+        and (stored.get("report") or {}).get("version", JOB_COMPARISON_VERSION) == JOB_COMPARISON_VERSION
     )
     building = bool(stored) and stored.get("status") == "BUILDING"
     if building:

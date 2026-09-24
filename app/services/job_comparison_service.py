@@ -15,9 +15,9 @@ from typing import Any, Iterable
 import yaml
 
 from app.services.export_service import row_comment
-from app.services.result_status import GROUP_LABELS, STATUS_LABELS, effective_status
+from app.services.result_status import GROUP_LABELS, GROUP_OF_STATUS, STATUS_LABELS, effective_status, route_label, route_of
 
-JOB_COMPARISON_VERSION = "job-comparison-v2"
+JOB_COMPARISON_VERSION = "job-comparison-v3"
 REVIEWER_CASES_PATH = Path(__file__).resolve().parents[1] / "evaluations" / "reviewer_confirmed_cases.v1.yaml"
 
 FIELDS = ("standard_size", "standard_uom", "standard_pack_size")
@@ -210,6 +210,7 @@ class JobComparisonService:
         past_status: Counter[str] = Counter()
         new_status: Counter[str] = Counter()
         groups: Counter[str] = Counter()
+        past_groups: Counter[str] = Counter()
         by_item: dict[str, dict[str, Any]] = {}
         missing_in_past = 0
         for item in new_items:
@@ -223,12 +224,18 @@ class JobComparisonService:
             past = outcome(past_item)
             change = classify(past, new)
             context = item.get("context") or {}
-            group = str(item.get("group") or "")
+            # The outcome group of each run: a row can move group when its result changes.
+            group = GROUP_OF_STATUS[new["status"]]
+            past_group = GROUP_OF_STATUS[past["status"]]
             row = {
                 "row_number": item["row_number"],
                 "item_no": str(item.get("item_no") or ""),
                 "group": group,
-                "group_label": GROUP_LABELS.get(group, group),
+                "group_label": GROUP_LABELS[group],
+                "past_group": past_group,
+                "past_group_label": GROUP_LABELS[past_group],
+                "route": route_of(item),
+                "route_label": route_label(item),
                 "product": context.get("item_desc_eng") or context.get("web_description_eng") or "",
                 "product_local": context.get("item_desc_local_lang") or context.get("web_description_chi") or "",
                 "uploaded": _values(*((item.get("original") or {}).get(field) for field in FIELDS)),
@@ -251,6 +258,7 @@ class JobComparisonService:
             past_status[past["status"]] += 1
             new_status[new["status"]] += 1
             groups[group] += 1
+            past_groups[past_group] += 1
 
         cases_version, reviewer, cases = load_reviewer_cases()
         reviewer_rows = []
@@ -303,6 +311,8 @@ class JobComparisonService:
                 "by_change": {change: by_change.get(change, 0) for change in CHANGE_LABELS},
                 "past_status": dict(past_status),
                 "new_status": dict(new_status),
+                "past_group": dict(past_groups),
+                "new_group": dict(groups),
             },
             "change_labels": dict(CHANGE_LABELS),
             "status_labels": dict(STATUS_LABELS),

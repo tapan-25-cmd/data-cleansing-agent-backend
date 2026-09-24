@@ -48,7 +48,7 @@ def _run_case(case: dict[str, Any]) -> dict[str, Any]:
     if validation is None:
         raise ValueError(f"evaluation case {case['id']} is not a complete Group A candidate")
     ledger = enrich_result_item({
-        "group": "A",
+        "route": "A",
         "original": {
             "standard_size": values.get("standard_size"),
             "standard_uom": values.get("standard_uom"),

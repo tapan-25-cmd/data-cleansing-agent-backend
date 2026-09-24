@@ -79,12 +79,12 @@ def test_export_applies_pending_proposals_without_rebuilding_workbook(tmp_path):
     assert result.sheetnames == [INPUT_SHEET]
     assert set(AUDIT_COLUMNS).issubset(output_headers)
     assert output_sheet.cell(2, output_headers["Cleansing Status"]).value == "Already correct"
-    assert output_sheet.cell(2, output_headers["Group"]).value == ""
+    assert output_sheet.cell(2, output_headers["Group"]).value == "A"
     assert output_sheet.cell(2, output_headers["Comment"]).value == (
         "Checked. The existing values passed every check."
     )
-    # The three columns that say what happened sit together, in reading order.
-    assert list(AUDIT_COLUMNS[:3]) == ["Group", "Cleansing Status", "Comment"]
+    # The columns that say what happened sit together, in reading order.
+    assert list(AUDIT_COLUMNS[:4]) == ["Group", "How", "Cleansing Status", "Comment"]
     result.close()
     assert repositories.job["status"] == "EXPORTED"
 
@@ -285,7 +285,7 @@ def test_the_comment_says_what_happened_to_each_kind_of_row():
     from app.services.export_service import _comment
 
     corrected = _comment({
-        "group": "B", "application_policy": "AUTO_APPLY", "method": "RULE",
+        "route": "B", "application_policy": "AUTO_APPLY", "method": "RULE",
         "original": {"legacy_size": "16", "legacy_uom": "OZ"},
         "field_proposals": {"standard_size": "454", "standard_uom": "GM"},
         "changes": [
@@ -297,18 +297,42 @@ def test_the_comment_says_what_happened_to_each_kind_of_row():
     assert corrected == (
         "Corrected from the legacy data (16 OZ): size blank → 454, unit OZ → GM."
     )
+    in_place = _comment({
+        "route": "B", "application_policy": "AUTO_APPLY", "method": "RULE",
+        "original": {"legacy_size": "16", "legacy_uom": "OZ", "standard_size": "16", "standard_uom": "OZ", "standard_pack_size": "1"},
+        "field_proposals": {"standard_size": "454", "standard_uom": "GM"},
+        "changes": [
+            {"field": "standard_size", "original": "16", "proposed": "454"},
+            {"field": "standard_uom", "original": "OZ", "proposed": "GM"},
+        ],
+        "findings": [],
+    })
+    assert in_place == "Converted to a standard unit with the unit table: size 16 → 454, unit OZ → GM."
+    completed = _comment({
+        "route": "INCOMPLETE", "application_policy": "AUTO_APPLY", "method": "RULE",
+        "original": {"legacy_size": "500", "legacy_uom": "G", "standard_size": "500"},
+        "field_proposals": {"standard_uom": "GM", "standard_pack_size": "1"},
+        "field_provenance": {"standard_uom": {"method": "RULE", "rule_id": "GAP_FROM_LEGACY"},
+                             "standard_pack_size": {"method": "RULE", "rule_id": "SINGLE_ITEM_DEFAULT"}},
+        "changes": [
+            {"field": "standard_uom", "original": None, "proposed": "GM"},
+            {"field": "standard_pack_size", "original": None, "proposed": "1"},
+        ],
+        "findings": [],
+    })
+    assert completed == "Filled in the missing values (old size, unit table + pack rule: single item): unit blank → GM, pack size blank → 1."
 
-    purged = _comment({"group": "SKIPPED_PURGED", "application_policy": "NO_CHANGE", "findings": []})
+    purged = _comment({"route": "SKIPPED_PURGED", "application_policy": "NO_CHANGE", "findings": []})
     assert purged.startswith("This product record is empty")
     assert "passed every check" not in purged
 
-    no_rule = _comment({"group": "B", "reason_code": "NO_RULE", "application_policy": "NO_CHANGE",
+    no_rule = _comment({"route": "B", "reason_code": "NO_RULE", "application_policy": "NO_CHANGE",
                         "original": {"legacy_size": "1", "legacy_uom": "ST"}, "findings": [],
                         "field_proposals": {"standard_size": None, "standard_uom": None}})
     assert no_rule == ("The legacy unit ST has no agreed conversion, so the size could not be "
                        "filled in. It was left blank rather than guessed.")
 
-    untouched = _comment({"group": "A", "application_policy": "NO_CHANGE", "findings": []})
+    untouched = _comment({"route": "A", "application_policy": "NO_CHANGE", "findings": []})
     assert untouched == "Checked. The existing values passed every check."
 
 
@@ -316,7 +340,7 @@ def test_review_comments_carry_the_numbers_a_person_needs():
     from app.services.export_service import _comment
 
     row = {
-        "group": "A", "application_policy": "REVIEW_REQUIRED",
+        "route": "A", "application_policy": "REVIEW_REQUIRED",
         "original": {"legacy_size": "12.3", "legacy_uom": "OZ", "standard_size": 375, "standard_uom": "GM"},
         "findings": [{
             "code": "SIGNIFICANT_LEGACY_SIZE_MISMATCH", "field": "standard_size",
@@ -338,7 +362,7 @@ def test_review_comments_carry_the_numbers_a_person_needs():
     )
 
     mixed_units = {
-        "group": "A", "application_policy": "REVIEW_REQUIRED",
+        "route": "A", "application_policy": "REVIEW_REQUIRED",
         "original": {"legacy_size": "100", "legacy_uom": "ML", "standard_uom": "GM"},
         "findings": [{
             "code": "LEGACY_UOM_MISMATCH", "field": "standard_uom", "human_reason": "jargon",

@@ -4,9 +4,10 @@ from copy import deepcopy
 from typing import Any
 
 from app.services.guards import GUARD_REVIEW_CODES
+from app.services.routes import route_of
 
 
-RESULT_LEDGER_VERSION = "result-ledger-v5"
+RESULT_LEDGER_VERSION = "result-ledger-v6"
 AUDIT_FIELDS = ("standard_size", "standard_uom", "standard_pack_size")
 
 _FINDING_METADATA = {
@@ -140,15 +141,35 @@ _FINDING_METADATA = {
         "INFO",
         "Agent found no explicit size or UOM",
     ),
+    "DESCRIPTION_SIZE_DIFFERS": (
+        "SOURCE_DISCREPANCY",
+        "REVIEW",
+        "The description states a different size than Excel",
+    ),
+    "PARTLY_FILLED_ROW": (
+        "VALIDATION",
+        "INFO",
+        "The row was partly filled in the workbook",
+    ),
+    "GAP_NOT_FOUND": (
+        "VALIDATION",
+        "REVIEW",
+        "A missing value could not be found",
+    ),
+    "GAP_SUGGESTED": (
+        "VALIDATION",
+        "REVIEW",
+        "A missing value is suggested for a person to confirm",
+    ),
+    "UNUSABLE_VALUE": (
+        "VALIDATION",
+        "REVIEW",
+        "A value in the row cannot be used",
+    ),
     "LEGACY_SIZE_MISSING": (
         "VALIDATION",
         "INFO",
         "The legacy field has a unit but no size",
-    ),
-    "INCOMPLETE_ROW": (
-        "VALIDATION",
-        "ERROR",
-        "The row is incomplete and cannot be checked or filled",
     ),
     "UNMAPPED_SOURCE_UOM": (
         "INSUFFICIENT_EVIDENCE",
@@ -164,6 +185,10 @@ _FINDING_METADATA = {
 
 REVIEW_CODES = GUARD_REVIEW_CODES | frozenset({
     "SIGNIFICANT_LEGACY_SIZE_MISMATCH",
+    "DESCRIPTION_SIZE_DIFFERS",
+    "GAP_NOT_FOUND",
+    "GAP_SUGGESTED",
+    "UNUSABLE_VALUE",
     "LINKED_SIZE_AND_PACK_SUGGESTION",
     "DESCRIPTION_PACK_COUNT_DIFFERS",
     "LEGACY_UOM_MISMATCH",
@@ -266,6 +291,15 @@ def _finding(issue: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def differs(proposed: Any, before: Any) -> bool:
+    """Whether writing ``proposed`` would change the cell. Numbers compare as numbers
+    (500 and 500.0 are the same cell); text exactly, so "ml" → "ML" is a change."""
+    try:
+        return float(proposed) != float(before)
+    except (TypeError, ValueError):
+        return str(proposed).strip() != str(before if before is not None else "").strip()
+
+
 def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
     """Add stable, UI/export-ready findings and field-level change records."""
     item = deepcopy(source)
@@ -317,7 +351,7 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
     # pack size 1, and the row says so in a note.
     pack_result = item.get("pack_result") or {}
     if (
-        item.get("group") == "B"
+        route_of(item) == "B"
         and proposals.get("standard_size") is not None
         and proposals.get("standard_uom") is not None
         and proposals.get("standard_pack_size") is None
@@ -340,27 +374,19 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
         }))
         issue_codes.add("PACK_SIZE_SINGLE_ITEM")
 
-    if item.get("group") == "DATA_SHAPE_ERROR" and "INCOMPLETE_ROW" not in issue_codes:
-        present = [name for field, name in (("standard_size", "size"), ("standard_uom", "unit"), ("standard_pack_size", "pack size")) if original.get(field) not in (None, "")]
-        missing = [name for field, name in (("standard_size", "size"), ("standard_uom", "unit"), ("standard_pack_size", "pack size")) if original.get(field) in (None, "")]
-        findings.append(_finding({
-            "code": "INCOMPLETE_ROW", "field": "standard_size", "severity": "ERROR",
-            "message": (
-                f"Excel has the {' and '.join(present)} but not the {' or '.join(missing)}. A partly filled "
-                "row can be neither checked nor filled in safely, so it is reported as it is."
-            ),
-            "current_value": ", ".join(present) or None,
-        }))
-        issue_codes.add("INCOMPLETE_ROW")
-
     has_proposal = any(proposals.get(field) is not None for field in AUDIT_FIELDS)
+    # Group B is a change to K, L or M. A proposal equal to what Excel has changes nothing.
+    has_change = any(
+        proposals.get(field) is not None and differs(proposals.get(field), original.get(field))
+        for field in AUDIT_FIELDS
+    )
     requires_review = bool(issue_codes & REVIEW_CODES)
     no_size = proposals.get("standard_size") is None and proposals.get("standard_uom") is None
     rule_unresolved = (
-        item.get("group") == "B" and no_size
+        route_of(item) == "B" and no_size
         and item.get("reason_code") in {"NO_RULE", "MALFORMED_VALUE"}
     )
-    agent_unresolved = item.get("group") == "C" and not has_proposal
+    agent_unresolved = route_of(item) == "C" and not has_proposal
     if rule_unresolved and not has_proposal:
         legacy_uom = str(original.get("legacy_uom") or "this unit")
         if original.get("legacy_size") in (None, ""):
@@ -411,7 +437,7 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
         review["overall_status"] = "PENDING"
         review.setdefault("override_values", None)
         review.setdefault("comment", None)
-    elif has_proposal:
+    elif has_change:
         policy = "AUTO_APPLY"
     elif findings:
         policy = "OBSERVATION_ONLY"

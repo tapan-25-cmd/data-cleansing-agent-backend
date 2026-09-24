@@ -14,7 +14,7 @@ from app.agents.reconcile import (
     DESCRIPTION_FIELDS, RECONCILE_PROMPT_VERSION, ReconcileRequest, ReconcileResponse, RuleOutcome, SourceValue,
 )
 from app.services.job_comparison_service import FIELDS, _values, describe, outcome, reviewer_verdict, load_reviewer_cases, _same
-from app.services.result_status import STATUS_LABELS, effective_status
+from app.services.result_status import STATUS_LABELS, effective_status, outcome_group, route_of
 
 LANE_A_TRIAL_VERSION = "lane-a-trial-v2"
 CASES_PATH = Path(__file__).resolve().parents[1] / "evaluations" / "reconcile_eval_cases.v1.yaml"
@@ -145,7 +145,7 @@ def score_row(item: dict[str, Any], response: ReconcileResponse, reviewer_cases:
         else "SUGGEST"
     )
     return {
-        "row_number": item.get("row_number"), "item_no": item.get("item_no"), "group": item.get("group"),
+        "row_number": item.get("row_number"), "item_no": item.get("item_no"), "route": route_of(item), "group": outcome_group(item),
         "expected": {"verdict": case["verdict"], "values": case["values"], "score": expected_score, "note": case.get("note")} if case else None,
         "guards": guard_notes, "tier": tier,
         "status": result["status"], "engine_values": engine_final, "engine_suggestion": engine_suggestion,

@@ -5,7 +5,10 @@ from decimal import Decimal
 from enum import Enum
 
 from app.services.discrepancy_service import within_conversion_tolerance
+from app.services.guards import FLUID_OUNCE_UOM
 from app.services.rule_engine import RuleEngine
+
+OUNCE_SPELLINGS = frozenset({"OZ", "FZ", "FLOZ", "FL OZ"})
 
 
 KLM_RECONCILIATION_VERSION = "klm-reconciliation-v3"
@@ -87,6 +90,13 @@ class KLMReconciliationService:
             )
 
         proposal = self.comparison_engine.propose(legacy_size, legacy_uom)
+        if (
+            proposal is not None and proposal.standard_uom != standard_uom and standard_uom == "ML"
+            and str(legacy_uom).strip().upper() in OUNCE_SPELLINGS
+        ):
+            # An ounce against a volume is a fluid ounce: the same reading the conversion
+            # gives a liquid, so a converted row is not questioned when it is read back.
+            proposal = self.comparison_engine.propose(legacy_size, FLUID_OUNCE_UOM) or proposal
         if proposal is None:
             return LegacyAssessment(
                 LegacyRelationship.NOT_COMPARABLE,

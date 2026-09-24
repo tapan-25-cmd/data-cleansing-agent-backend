@@ -511,3 +511,65 @@ Group C (read from descriptions; I without J is unusable and also lands here). A
 K/L/M (one or two of the three) → invalid shape, now its own status `INVALID` with the finding
 `INCOMPLETE_ROW` naming what is present and what is missing; previously such rows were
 labelled "Already correct". The real workbook contains only the full and empty shapes.
+
+## 19. Groups are the outcome (24 September 2026)
+
+The groups were the method a row was sent to before anything was worked out. They are now
+the result, decided last, from the row's single status:
+
+| Group | Meaning | Statuses |
+|---|---|---|
+| A · No change | nothing in K, L or M was written | Already correct, Correct with a note |
+| B · Changed by the tool | the tool wrote K, L or M itself, whatever found the value | Corrected automatically |
+| C · Raised for a person | needs review, could not determine, or values that cannot be used; every discrepancy | Needs your review, Could not determine, Invalid values |
+| Purged | skipped before anything ran | Skipped |
+
+A person's later decision does not move a row. The group is never stored: `outcome_group`
+derives it from `effective_status`, and `group_query` is its MongoDB twin (tested together over
+every combination of route, policy, findings, proposals and reason).
+
+**Route and group.** The method is still chosen from the row's shape and is stored as
+`route` (A check, B convert, C read, INCOMPLETE, VALIDATION_REVIEW, DATA_SHAPE_ERROR,
+SKIPPED_PURGED). The v0.2 invariant now asserts route counts. Stored rows were migrated with
+`MongoRepositories.migrate_routes` (226,100 rows renamed `group` → `route`, index swapped).
+Screens say "method", never "lane", and methods carry no letters.
+
+**Half-filled rows** (supersedes §18's `INVALID`/`INCOMPLETE_ROW`). Route `INCOMPLETE` keeps
+what is filled and looks for the rest (`GapFillService`): a missing unit from the old size when
+it states the same size or size × pack; a missing size from the old size (suggested only when
+Excel's pack is above 1) or a single size written in the description; a missing pack from a
+count in the description, a whole-number old size ÷ size (suggested), or a single item. Found
+and certain → written (B). Only suggested (`GAP_SUGGESTED`), written nowhere (`GAP_NOT_FOUND`)
+or unusable (`UNUSABLE_VALUE`) → raised (C). The completed values then pass the same checker as
+complete rows.
+
+**Other rules that follow from the definition.**
+- A description stating a different size in the same kind of unit as Excel is now raised
+  (`DESCRIPTION_SIZE_DIFFERS`); a number in another kind of unit stays a note
+  (`DESCRIPTION_MEASUREMENT_MISMATCH`, most likely part of the name). Validator v6.
+- A proposal equal to what Excel already has is not a change: `AUTO_APPLY` requires at least
+  one cell to differ (`differs`: numbers as numbers, text exactly, so "ml" → "ML" is a change).
+- The checker reads a legacy ounce against an Excel volume as a fluid ounce, the same reading
+  the converter gives a liquid. Found by the round trip: three 48 OZ milks converted to
+  1420 ML came back raised as a unit mismatch. On v0.2 it closes 13 raises that were real
+  matches (32 OZ vinegar = 946 ML); the 8 real differences stay raised, now with the
+  fluid-ounce value as the suggestion.
+
+**Export.** New "How" column after Group: where each change came from ("Old size, unit
+table", "Read from the description", "Pack rule: single item", ...) or the method for an
+unchanged row. Comments distinguish a conversion of Excel's own value from one of the old
+size, and name half-filled completions. Export v6.
+
+**Accuracy (v4)** is judged per group against its own question: A "was keeping right?", B
+"was the change right?" (both: right ÷ checked, unverified shown and left out), C "was raising
+it right?" (every raise judged; a raise the data bears out counts right, a raise the text shows
+was not needed and a blank where a size is written count against). No blind test is shown
+under C.
+
+**Measured.** Offline v0.2 replay (mock AI): route invariant held; A 11,745 / B 505 / C 292 /
+Purged 758; every B row writes K, L or M and no A, C or Purged row writes anything. Round
+trip: all 505 B rows come back A, every A, C and Purged row stays in its group, and the
+export's Group and How columns match the screen on every row. The live job 9ea8ad60 (processed
+by the earlier engine, so without the new checks) reads A 11,742 / B 496 / C 304 / Purged 758;
+accuracy A 99.9 % (12 kept against the description), B 100 % of 111 checkable, C 97.7 % (7
+raises not needed). A fresh run is needed to see the new checks on live data.

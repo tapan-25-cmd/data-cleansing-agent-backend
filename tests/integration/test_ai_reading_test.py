@@ -69,7 +69,7 @@ class ReadingProvider:
 
 def item(item_no, desc, klm, group="A"):
     return {
-        "item_no": item_no, "row_number": int(item_no) + 1, "group": group,
+        "item_no": item_no, "row_number": int(item_no) + 1, "route": group,
         "original": {"legacy_size": "999", "legacy_uom": "EA", "standard_size": klm[0],
                      "standard_uom": klm[1], "standard_pack_size": "1"},
         "context": {"item_desc_eng": desc}, "findings": [],

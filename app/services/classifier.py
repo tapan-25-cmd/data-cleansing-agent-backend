@@ -18,4 +18,7 @@ def classify(product: InputProduct, purged: bool = False) -> WorkGroup:
         return WorkGroup.B
     if blank(product.standard_size) and blank(standard_uom) and blank(product.legacy_uom):
         return WorkGroup.C
-    return WorkGroup.DATA_SHAPE_ERROR
+    # Only part of size, unit and pack is filled. The PRD baseline expects none of these
+    # (implementation plan section 16); rather than reject them, the tool completes the
+    # missing values from the old size or the description, or asks a person.
+    return WorkGroup.INCOMPLETE

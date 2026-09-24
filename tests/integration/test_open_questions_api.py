@@ -19,7 +19,7 @@ class FakeRepositories:
 
     def attention_items(self, job_id):
         return [{
-            "row_number": 14233, "item_no": "125773", "group": "A",
+            "row_number": 14233, "item_no": "125773", "route": "A",
             "context": {"item_desc_eng": "MULTI COLOR CANDLE", "item_desc_local_lang": "彩色長蠟燭6枝"},
             "original": {"legacy_size": "1", "legacy_uom": "PK", "standard_size": 6, "standard_uom": "EA", "standard_pack_size": 1},
             "field_proposals": {"standard_size": None, "standard_uom": None, "standard_pack_size": None},
@@ -78,7 +78,7 @@ def test_unfinished_or_unknown_jobs_are_rejected():
 
 def test_rules_guide_lists_flow_tables_and_versions():
     guide = client(FakeRepositories()).get("/api/rules?job_id=j1").json()
-    assert [step["step"] for step in guide["flow"]] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert [step["step"] for step in guide["flow"]] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     kg = next(r for r in guide["unit_mapping"]["rules"] if r["rule_id"] == "KG_TO_GM")
     assert kg["example"] == "1 KG becomes 1000 GM" and "公斤" in kg["source_uoms"]
     assert guide["unit_mapping"]["readiness"]["uncovered_source_uoms"] == ["ST"]
@@ -87,7 +87,7 @@ def test_rules_guide_lists_flow_tables_and_versions():
     assert guide["versions"]["this_job"]["validation"] == "group-a-validation-v5"
     assert guide["category_profile"]["liquid_categories"] == ["Juices"]
     nodes = {n["id"] for n in guide["pipeline"]["nodes"]}
-    assert {"upload", "lane", "lane_a", "lane_b", "lane_c", "ledger", "review", "export"} <= nodes
+    assert {"upload", "lane", "lane_a", "lane_b", "lane_c", "lane_incomplete", "ledger", "sort", "review", "export"} <= nodes
     assert all(a in nodes and b in nodes for a, b, *_ in guide["pipeline"]["edges"])
     assert guide["reasoning"]["status"] == "SHADOW" and len(guide["reasoning"]["policy"]) == 3
     assert set(guide["accuracy_method"]) == {"A", "B", "C"} and all("{accuracy}" in "".join(v) for v in guide["accuracy_method"].values())

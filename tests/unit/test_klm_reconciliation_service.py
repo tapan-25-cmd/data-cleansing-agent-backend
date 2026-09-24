@@ -92,3 +92,16 @@ def test_same_unit_legacy_near_the_unit_size_still_needs_an_exact_match():
 def test_piece_counts_get_no_rounding_allowance():
     result = assess(legacy_size="1", legacy_uom="PC", standard_size=Decimal("2"), standard_uom="EA", standard_pack_size=Decimal("1"))
     assert result.relationship == LegacyRelationship.SIGNIFICANT_MISMATCH
+
+
+def test_an_ounce_against_a_volume_is_read_as_a_fluid_ounce():
+    # 32 OZ of vinegar is 946 ML: the same reading the conversion gives a liquid, so a row
+    # the tool converted is not questioned when the cleansed workbook is read back.
+    one = {"standard_pack_size": Decimal("1")}
+    assert assess(legacy_size="32", legacy_uom="OZ", standard_size=Decimal("946"), standard_uom="ML", **one).relationship == LegacyRelationship.UNIT_MATCH
+    assert assess(legacy_size="48", legacy_uom="OZ", standard_size=Decimal("1420"), standard_uom="ML", **one).relationship == LegacyRelationship.UNIT_MATCH
+    # A real difference stays a difference, now with the fluid-ounce value to compare.
+    prune = assess(legacy_size="32", legacy_uom="OZ", standard_size=Decimal("960"), standard_uom="ML", **one)
+    assert (prune.relationship, prune.expected_value, prune.expected_uom) == (LegacyRelationship.SIGNIFICANT_MISMATCH, Decimal("946"), "ML")
+    # Against a weight the ounce stays a weight ounce.
+    assert assess(legacy_size="16", legacy_uom="OZ", standard_size=Decimal("454"), standard_uom="GM", **one).relationship == LegacyRelationship.UNIT_MATCH

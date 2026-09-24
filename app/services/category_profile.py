@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Iterable
 
+from app.services.routes import route_of
+
 CATEGORY_PROFILE_VERSION = "category-profile-v1"
 MIN_SUPPORT = 15
 # D2: a category is liquid when at least this share of its weight/volume rows are ML.
@@ -101,7 +103,7 @@ class CategoryProfile:
         """From stored result items: Group A rows are the validated ones."""
         profile = cls()
         for item in items:
-            if item.get("group") != "A":
+            if route_of(item) != "A":
                 continue
             original = item.get("original") or {}
             unit = str(original.get("standard_uom") or "").strip().upper()

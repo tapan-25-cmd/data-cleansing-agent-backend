@@ -12,10 +12,16 @@ from app.repositories.mongo import MongoRepositories
 from app.services.excel_reader import ExcelReader, WorkbookValidationError
 from app.services.export_service import EXPORT_VERSION
 from app.services.processor import JobProcessor
-from app.services.result_status import effective_status, status_query
+from app.services.result_status import GROUPS, describe, group_query, status_query
 from app.storage.local import LocalFileStorage, UploadTooLargeError
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+def route_filter(route: str) -> dict[str, object]:
+    """The method a row went through. Route A covers the rows the checker sent for review."""
+    routes = ["A", "VALIDATION_REVIEW"] if route == "A" else [route]
+    return {"route": {"$in": routes}}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -161,9 +167,10 @@ def get_summary(job_id: str, repos: Annotated[MongoRepositories, Depends(reposit
 def list_results(
     job_id: str,
     repos: Annotated[MongoRepositories, Depends(repositories)],
-    group: str | None = None,
+    group: Literal["A", "B", "C", "PURGED"] | None = None,
+    route: str | None = None,
     status: Literal[
-        "NO_CHANGE", "AUTO_APPLY", "REVIEW_REQUIRED", "OBSERVATION_ONLY", "UNRESOLVED", "SKIPPED"
+        "NO_CHANGE", "AUTO_APPLY", "REVIEW_REQUIRED", "OBSERVATION_ONLY", "UNRESOLVED", "INVALID", "SKIPPED"
     ] | None = None,
     review_status: Literal[
         "NOT_REQUIRED", "PENDING", "APPROVED", "REJECTED", "OVERRIDDEN"
@@ -179,29 +186,33 @@ def list_results(
 ) -> dict:
     if not repos.get_job(job_id):
         raise HTTPException(404, "Job not found")
-    query: dict[str, object] = {}
+    # Each filter is its own clause: the group, status and search filters all use $or.
+    clauses: list[dict[str, object]] = []
     if group:
-        query["group"] = group
+        clauses.append(group_query(group))
+    if route:
+        clauses.append(route_filter(route))
     if status:
-        query.update(status_query(status))
+        clauses.append(status_query(status))
     if review_status:
-        query["review.overall_status"] = review_status
+        clauses.append({"review.overall_status": review_status})
     if finding_category:
-        query["findings.category"] = finding_category
+        clauses.append({"findings.category": finding_category})
     if finding_severity:
-        query["findings.severity"] = finding_severity
+        clauses.append({"findings.severity": finding_severity})
     if changed_field:
-        query["changes"] = {"$elemMatch": {
+        clauses.append({"changes": {"$elemMatch": {
             "field": changed_field,
             "proposed": {"$ne": None},
-        }}
+        }}})
     if search and search.strip():
         safe = re.escape(search.strip())
-        query["$or"] = [
+        clauses.append({"$or": [
             {"item_no": {"$regex": safe, "$options": "i"}},
             {"context.item_desc_eng": {"$regex": safe, "$options": "i"}},
             {"context.web_description_eng": {"$regex": safe, "$options": "i"}},
-        ]
+        ]})
+    query: dict[str, object] = {"$and": clauses} if clauses else {}
     rows, total = repos.list_items(
         job_id,
         query,
@@ -209,7 +220,7 @@ def list_results(
         page_size,
     )
     for row in rows:
-        row["status"] = effective_status(row)
+        describe(row)
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
@@ -232,32 +243,35 @@ def get_result_item(
     item = repos.get_item(job_id, row_number)
     if not item:
         raise HTTPException(404, "Result item not found")
-    item["status"] = effective_status(item)
-    return item
+    return describe(item)
 
 
 @router.get("/{job_id}/items")
 def list_items(
     job_id: str,
     repos: Annotated[MongoRepositories, Depends(repositories)],
-    group: str | None = None,
+    group: Literal["A", "B", "C", "PURGED"] | None = None,
+    route: str | None = None,
     discrepancy: bool | None = None,
     review_status: Literal["PENDING", "APPROVED", "REJECTED", "OVERRIDDEN"] | None = None,
     reason_code: str | None = None,
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> dict:
-    query: dict[str, object] = {}
+    clauses: list[dict[str, object]] = []
     if group:
-        query["group"] = group
+        clauses.append(group_query(group))
+    if route:
+        clauses.append(route_filter(route))
     if discrepancy is not None:
-        query["discrepancy.flagged"] = discrepancy
+        clauses.append({"discrepancy.flagged": discrepancy})
     if review_status is not None:
-        query["review.overall_status"] = review_status
+        clauses.append({"review.overall_status": review_status})
     if reason_code is not None:
-        query["reason_code"] = reason_code
+        clauses.append({"reason_code": reason_code})
+    query: dict[str, object] = {"$and": clauses} if clauses else {}
     rows, total = repos.list_items(job_id, query, (page - 1) * page_size, page_size)
-    return {"items": rows, "total": total, "page": page, "page_size": page_size}
+    return {"items": [describe(row) for row in rows], "total": total, "page": page, "page_size": page_size}
 
 
 @router.get("/{job_id}/preview")
@@ -270,9 +284,9 @@ def preview_items(
         raise HTTPException(404, "Job not found")
     per_group = max(1, limit // 3)
     items: list[dict] = []
-    for group in ("A", "B", "C"):
-        rows, _ = repos.list_items(job_id, {"group": group}, 0, per_group)
-        items.extend(rows)
+    for group in GROUPS[:3]:
+        rows, _ = repos.list_items(job_id, group_query(group), 0, per_group)
+        items.extend(describe(row) for row in rows)
     return {"items": items[:limit]}
 
 

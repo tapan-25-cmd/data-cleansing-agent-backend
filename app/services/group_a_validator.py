@@ -31,7 +31,7 @@ from app.services.klm_reconciliation_service import (
 )
 
 
-GROUP_A_VALIDATION_VERSION = "group-a-validation-v5"
+GROUP_A_VALIDATION_VERSION = "group-a-validation-v6"
 # (field name used for evidence, attribute on InputProduct)
 _DESCRIPTION_FIELDS = (
     ("item_desc_eng", "item_desc_eng"),
@@ -669,12 +669,30 @@ class GroupAValidator:
                 for target in accepted
             )
             if not supported:
-                issues.append(ValidationIssue(
-                    "DESCRIPTION_MEASUREMENT_MISMATCH",
-                    evidence_field,
-                    ValidationSeverity.WARNING,
-                    "Explicit description measurement differs from existing K/L",
-                    "; ".join(signal.fragment for signal in signals.measurements),
-                    f"{standard_size} {standard_uom}",
-                ))
+                # The same kind of quantity (a weight against a weight) stating another
+                # size is a real disagreement: the description wins, so a person decides.
+                # A different kind (3G on a vinegar measured in ML) is almost always part
+                # of the name or grade, so it stays a note.
+                same_kind = [
+                    signal for signal in signals.measurements
+                    if signal.dimension == expected_dimension
+                ]
+                if same_kind:
+                    issues.append(ValidationIssue(
+                        "DESCRIPTION_SIZE_DIFFERS",
+                        evidence_field,
+                        ValidationSeverity.WARNING,
+                        "The description states a different size than the one in Excel",
+                        "; ".join(signal.fragment for signal in same_kind),
+                        f"{standard_size} {standard_uom}",
+                    ))
+                else:
+                    issues.append(ValidationIssue(
+                        "DESCRIPTION_MEASUREMENT_MISMATCH",
+                        evidence_field,
+                        ValidationSeverity.WARNING,
+                        "The description has a number in a different kind of unit; most likely part of the name",
+                        "; ".join(signal.fragment for signal in signals.measurements),
+                        f"{standard_size} {standard_uom}",
+                    ))
         return issues

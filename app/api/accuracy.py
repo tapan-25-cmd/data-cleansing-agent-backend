@@ -10,6 +10,7 @@ from app.repositories.mongo import MongoRepositories
 from app.services.accuracy_service import ACCURACY_VERSION, SETS, AccuracyService
 from app.services.job_comparison_service import outcome
 from app.services.rule_engine import RuleEngine
+from app.services.result_status import outcome_group, route_of
 
 router = APIRouter(prefix="/jobs", tags=["accuracy"])
 _READY = frozenset({"READY_FOR_REVIEW", "REVIEW_IN_PROGRESS", "READY_TO_EXPORT", "EXPORTING", "EXPORTED"})
@@ -101,7 +102,7 @@ def accuracy_set(job_id: str, set_id: str, repos: Annotated[MongoRepositories, D
         context = item.get("context") or {}
         original = item.get("original") or {}
         out.append({
-            "row_number": item["row_number"], "item_no": item.get("item_no"), "group": item.get("group"),
+            "row_number": item["row_number"], "item_no": item.get("item_no"), "route": route_of(item), "group": outcome_group(item),
             "product": context.get("item_desc_eng") or context.get("web_description_eng") or "",
             "product_local": context.get("item_desc_local_lang") or context.get("web_description_chi") or "",
             "legacy": " ".join(str(v) for v in (original.get("legacy_size"), original.get("legacy_uom")) if v not in (None, "")),

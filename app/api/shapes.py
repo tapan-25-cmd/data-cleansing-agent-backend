@@ -17,34 +17,42 @@ FIELDS = [
     {"key": "M", "name": "Pack", "column": "M", "example": "5", "story": "How many pieces are sold together."},
 ]
 
+# The group is the outcome, decided after the row has been worked on.
 GROUPS = {
-    "A": {"name": "Group A · Already filled in",
-          "story": "Size, unit and pack are all filled in. The tool does not change them. It checks them against the old size and the product description, and asks a person when something does not match."},
-    "B": {"name": "Group B · Filled in from the old size",
-          "story": "Size and unit are empty, but the old system has a size and unit. The tool converts it with a fixed table, for example 1 KG becomes 1000 GM, and fills it in."},
-    "C": {"name": "Group C · Read from the description",
-          "story": "There is no old size to use. The tool reads the product description and fills in a size only if one is written there. If nothing is written, it leaves the row empty."},
+    "A": {"name": "Group A · No change",
+          "story": "Nothing in K, L or M was changed. The values were checked and kept, sometimes with a note explaining why."},
+    "B": {"name": "Group B · Changed by the tool",
+          "story": "The tool wrote a value into K, L or M itself: converted from the old size, read from the description, or completed from what the row already had."},
+    "C": {"name": "Group C · Raised for a person",
+          "story": "The tool could not settle the row on its own: sources disagree, a value is only suggested, nothing is written anywhere, or a value cannot be used. Nothing is written until a person decides."},
     "PURGED": {"name": "Purged · Skipped",
                "story": "The product is marked as purged in the workbook and has no details. It is checked first, before any other rule, and skipped. Nothing is read or changed, and it comes back in the download exactly as it was."},
-    "INVALID": {"name": "Incomplete row",
-                "story": "Only part of size, unit and pack is filled in. The tool does not guess the rest. It marks the row so someone can complete it."},
+}
+
+# The method is chosen from the row's shape before anything is worked out.
+ROUTES = {
+    "A": {"name": "Check existing values", "story": "Size, unit and pack are all filled in, so they are checked, not rewritten."},
+    "B": {"name": "Convert from the old size", "story": "Size and unit are empty and the old system has a unit, so the old size is converted with the unit table."},
+    "C": {"name": "Read from the description", "story": "Size and unit are empty and there is no old unit, so the product description is read."},
+    "INCOMPLETE": {"name": "Complete a half-filled row", "story": "Some of size, unit and pack are filled. They are kept; the missing ones are looked for in the old size and the description."},
 }
 
 
-def _outcome(group: WorkGroup, has: dict[str, bool]) -> tuple[str, str]:
-    if group == WorkGroup.A:
+def _outcome(route: WorkGroup, has: dict[str, bool]) -> tuple[list[str], str, str]:
+    """The groups a row of this shape can end in, a short verdict, and what happens."""
+    if route == WorkGroup.A:
         if has["I"] and has["J"]:
-            return "Checked", "K, L and M are compared with the old size and with the product's words. Kept if they agree, sent to a person if they do not."
-        return "Checked, old size unusable", "K, L and M are checked against the product's words only; the old size is incomplete and cannot be used as a witness."
-    if group == WorkGroup.B:
+            return ["A", "C"], "Checked", "K, L and M are compared with the old size and with the product's words. Kept if they agree (A); raised if they do not (C)."
+        return ["A", "C"], "Checked, old size unusable", "K, L and M are checked against the product's words only; the old size is incomplete and cannot be used as a witness. Kept (A) or raised (C)."
+    if route == WorkGroup.B:
         if has["I"]:
-            return "Filled in", "The old size is converted with the unit table and written into K and L." + (" M is kept as it is." if has["M"] else " With no pack count written anywhere, the pack size becomes 1.")
-        return "Left empty", "There is a unit in J but no size in I, so there is nothing to convert. The row stays empty with a note."
-    if group == WorkGroup.C:
+            return ["B", "C"], "Filled in from the old size", "The old size is converted with the unit table and written into K and L (B)." + (" M is kept as it is." if has["M"] else " With no pack count written anywhere, the pack size becomes 1.") + " An ounce that could be weight or fluid, or a description that disagrees, is raised instead (C)."
+        return ["C"], "Could not determine", "There is a unit in J but no size in I, so there is nothing to convert. The row is raised with a note (C)."
+    if route == WorkGroup.C:
         if has["I"]:
-            return "Read from the words", "The old size has no unit, so it cannot be trusted. The description is read; a size is written only if it is literally there."
-        return "Read from the words", "The description is read; a size is written only if it is literally there, otherwise the row stays empty."
-    return "Reported as incomplete", "Some of K, L, M are filled but not all three. Nothing is checked or written; the row is marked invalid so someone can complete or clear it."
+            return ["B", "C"], "Read from the words", "The old size has no unit, so it cannot be used. The description is read; a size written there is filled in (B), otherwise the row is raised as could not determine (C)."
+        return ["B", "C"], "Read from the words", "The description is read; a size written there is filled in (B), otherwise the row is raised as could not determine (C)."
+    return ["B", "C"], "Completed where found", "What is filled is kept. Each missing value is looked for in the old size and the description: found and certain, it is written (B); only suggested or written nowhere, the row is raised (C)."
 
 
 @router.get("/shapes")
@@ -58,8 +66,8 @@ def shapes() -> dict:
             standard_size="70" if has["K"] else None, standard_uom="GM" if has["L"] else None,
             standard_pack_size="5" if has["M"] else None,
         )
-        group = classify(product)
-        key = {WorkGroup.A: "A", WorkGroup.B: "B", WorkGroup.C: "C"}.get(group, "INVALID")
-        outcome, detail = _outcome(group, has)
-        rows.append({"has": has, "group": key, "outcome": outcome, "detail": detail})
-    return {"fields": FIELDS, "groups": GROUPS, "rows": rows}
+        route = classify(product)
+        groups, outcome, detail = _outcome(route, has)
+        rows.append({"has": has, "route": route.value, "route_name": ROUTES[route.value]["name"],
+                     "groups": groups, "outcome": outcome, "detail": detail})
+    return {"fields": FIELDS, "groups": GROUPS, "routes": ROUTES, "rows": rows}

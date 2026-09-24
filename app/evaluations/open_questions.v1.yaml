@@ -1,4 +1,4 @@
-version: open-questions-v1
+version: open-questions-v2
 # Every row that is not simply "already correct" is placed in exactly one category.
 # Categories are tried in this order; the first whose `codes` (finding codes) match wins.
 # `status` / `uom` narrow a match. `kind` says what the reader is looking at:
@@ -15,6 +15,8 @@ groups:
     title: What the AI read
   - id: notes
     title: Notes to confirm
+  - id: half_filled
+    title: Half-filled rows
   - id: automatic
     title: Changed automatically
 categories:
@@ -136,12 +138,53 @@ categories:
     group: legacy_vs_excel
     kind: REVIEW
     name: Description states a different size than Excel
-    codes: [DESCRIPTION_MEASUREMENT_MISMATCH]
+    codes: [DESCRIPTION_SIZE_DIFFERS, DESCRIPTION_MEASUREMENT_MISMATCH]
     status: REVIEW_REQUIRED
     rule: >-
-      The description states a size that matches neither Excel's unit size nor its whole pack.
+      The description states a size in the same kind of unit as Excel, for example 900G
+      against 500 GM, that matches neither Excel's unit size nor its whole pack. Nothing was
+      changed.
     question: Which is right, the description or Excel?
     options: [The description, Excel, Decide product by product]
+  - id: unusable_value
+    group: half_filled
+    kind: REVIEW
+    name: A value in Excel cannot be used
+    codes: [UNUSABLE_VALUE]
+    rule: >-
+      Excel has text where a number should be, or a unit that is in no table, so the row can
+      be neither checked nor completed.
+    question: What should these values be?
+    options: [Correct them product by product, Clear them and let the tool fill them]
+  - id: half_filled_suggested
+    group: half_filled
+    kind: REVIEW
+    name: Half-filled row, a missing value is only suggested
+    codes: [GAP_SUGGESTED]
+    rule: >-
+      The row had some of size, unit and pack. A missing value was found, but a second source
+      disagrees with it, for example the old size may be the whole pack, so it is suggested
+      rather than written.
+    question: Can these suggestions be used?
+    options: [Use the suggestions, Decide product by product]
+  - id: half_filled_not_found
+    group: half_filled
+    kind: REVIEW
+    name: Half-filled row, a missing value is written nowhere
+    codes: [GAP_NOT_FOUND]
+    rule: >-
+      The row had some of size, unit and pack. A missing value is stated neither in the old
+      size nor in any description, so nothing was guessed.
+    question: Who can supply the missing values?
+    options: [Fill them in by hand, Leave them blank]
+  - id: other_invalid
+    group: half_filled
+    kind: REVIEW
+    name: Values that cannot be used
+    status: INVALID
+    rule: A value in the row cannot be used, so the row was neither checked nor filled.
+    question: See the finding on each row.
+    options: []
   - id: other_review
     group: legacy_vs_excel
     kind: REVIEW
@@ -238,6 +281,16 @@ categories:
       as text. Only the spelling or format was changed.
     question: None. Listed so every change is visible.
     options: []
+  - id: half_filled_completed
+    group: half_filled
+    kind: AUTO
+    name: Half-filled row completed
+    reason: PARTLY_FILLED_ROW
+    rule: >-
+      The row had some of size, unit and pack. The missing values were found in the old size
+      or stated in the description, and a product with no pack count is a single item.
+    question: Confirm the tool may complete half-filled rows this way.
+    options: [Confirmed, Send them to review instead]
   - id: read_from_description
     group: automatic
     kind: AUTO

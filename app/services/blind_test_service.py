@@ -24,6 +24,7 @@ from app.services.group_a_validator import GroupAValidator, ValidationSeverity
 from app.services.normalization import clean_uom
 from app.services.result_status import effective_status
 from app.services.rule_engine import RuleEngine
+from app.services.routes import route_of
 
 BLIND_TEST_VERSION = "blind-test-v1"
 TEXT_FIELDS = (("item_desc_eng", "item_desc_eng"), ("item_desc_local_lang", "item_desc_local"),
@@ -96,7 +97,7 @@ def _text_has_measurement(item: dict[str, Any]) -> bool:
 
 def clean_complete(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """The answer key: complete Group A products the tool kept without a question."""
-    return [x for x in items if x.get("group") == "A" and effective_status(x) in ("NO_CHANGE", "OBSERVATION_ONLY")
+    return [x for x in items if route_of(x) == "A" and effective_status(x) in ("NO_CHANGE", "OBSERVATION_ONLY")
             and _dec((x.get("original") or {}).get("standard_size")) is not None
             and _dec((x.get("original") or {}).get("standard_pack_size")) is not None]
 

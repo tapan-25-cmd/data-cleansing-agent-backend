@@ -5,7 +5,7 @@ from typing import Any, Iterable
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReplaceOne
 from pymongo.database import Database
 
-from app.services.result_status import STATUSES, status_query
+from app.services.result_status import GROUPS, STATUSES, STATUSES_OF_GROUP, status_query
 
 
 def now() -> datetime:
@@ -30,7 +30,7 @@ class MongoRepositories:
         self.db.jobs.create_index([("created_at", ASCENDING)])
         self.db.jobs.create_index("status")
         self.db.job_items.create_index([("job_id", ASCENDING), ("row_number", ASCENDING)], unique=True)
-        self.db.job_items.create_index([("job_id", ASCENDING), ("group", ASCENDING)])
+        self.db.job_items.create_index([("job_id", ASCENDING), ("route", ASCENDING)])
         self.db.job_items.create_index([("job_id", ASCENDING), ("review.overall_status", ASCENDING)])
         self.db.job_items.create_index([("job_id", ASCENDING), ("rule.rule_id", ASCENDING)])
         self.db.open_question_answers.create_index("category", unique=True)
@@ -107,9 +107,21 @@ class MongoRepositories:
             "row_number": row_number,
         }))
 
+    def migrate_routes(self) -> int:
+        """Rows stored before 24 September 2026 kept the method (route) under "group".
+        Rename it once; the group is now derived from each row's status."""
+        result = self.db.job_items.update_many(
+            {"route": {"$exists": False}, "group": {"$exists": True}}, {"$rename": {"group": "route"}},
+        )
+        for name, spec in self.db.job_items.index_information().items():
+            if spec.get("key") == [("job_id", 1), ("group", 1)]:
+                self.db.job_items.drop_index(name)
+        self.db.job_items.create_index([("job_id", ASCENDING), ("route", ASCENDING)])
+        return result.modified_count
+
     def result_facets(self, job_id: str) -> dict[str, dict[str, int]]:
         fields = {
-            "group": "$group",
+            "route": "$route",
             "review_status": "$review.overall_status",
             "finding_category": "$findings.category",
             "finding_severity": "$findings.severity",
@@ -129,11 +141,16 @@ class MongoRepositories:
             status: self.db.job_items.count_documents({"job_id": job_id, **status_query(status)})
             for status in STATUSES
         }
+        # The outcome groups are a function of the status, so they add up from it.
+        result["group"] = {
+            group: sum(result["status"].get(status, 0) for status in STATUSES_OF_GROUP[group])
+            for group in GROUPS
+        }
         return result
 
     def conversion_groups(self, job_id: str) -> list[dict[str, Any]]:
         pipeline = [
-            {"$match": {"job_id": job_id, "group": "B"}},
+            {"$match": {"job_id": job_id, "route": "B"}},
             {"$group": {
                 "_id": "$rule.rule_id",
                 "rows": {"$sum": 1},
@@ -153,7 +170,7 @@ class MongoRepositories:
     def approve_conversion_group(self, job_id: str, rule_id: str) -> tuple[int, int]:
         selector = {
             "job_id": job_id,
-            "group": "B",
+            "route": "B",
             "rule.rule_id": rule_id,
             "review.overall_status": "PENDING",
             "discrepancy.flagged": False,
@@ -167,7 +184,7 @@ class MongoRepositories:
             "review.overall_status": "APPROVED",
         }})
         group_total = self.db.job_items.count_documents({
-            "job_id": job_id, "group": "B", "rule.rule_id": rule_id
+            "job_id": job_id, "route": "B", "rule.rule_id": rule_id
         })
         return result.modified_count, group_total - eligible
 
@@ -186,6 +203,7 @@ class MongoRepositories:
             "_id": 0,
             "row_number": 1,
             "item_no": 1,
+            "route": 1,
             "group": 1,
             "method": 1,
             "reason_code": 1,
@@ -211,7 +229,7 @@ class MongoRepositories:
         """Every row that is not simply already correct or purged: the rows the
         open-questions view groups. A few hundred rows, so read in one go."""
         projection = {
-            "_id": 0, "row_number": 1, "item_no": 1, "group": 1, "method": 1,
+            "_id": 0, "row_number": 1, "item_no": 1, "route": 1, "group": 1, "method": 1,
             "reason_code": 1, "application_policy": 1, "context": 1, "original": 1,
             "field_proposals": 1, "changes": 1, "findings": 1,
             "review.overall_status": 1, "review.override_values": 1,
@@ -225,12 +243,12 @@ class MongoRepositories:
     def accuracy_items(self, job_id: str) -> list[dict[str, Any]]:
         """Every live row, narrow: what the accuracy sets need and nothing more."""
         projection = {
-            "_id": 0, "row_number": 1, "item_no": 1, "group": 1, "reason_code": 1,
+            "_id": 0, "row_number": 1, "item_no": 1, "route": 1, "group": 1, "reason_code": 1,
             "application_policy": 1, "original": 1, "field_proposals": 1, "findings.code": 1,
-            "context.category": 1, "context.item_desc_eng": 1, "context.item_desc_local_lang": 1,
+            "findings.human_reason": 1, "field_provenance": 1, "context.category": 1, "context.item_desc_eng": 1, "context.item_desc_local_lang": 1,
             "context.web_description_eng": 1, "context.web_description_chi": 1,
         }
-        return list(self.db.job_items.find({"job_id": job_id, "group": {"$ne": "SKIPPED_PURGED"}}, projection)
+        return list(self.db.job_items.find({"job_id": job_id, "route": {"$ne": "SKIPPED_PURGED"}}, projection)
                     .sort("row_number", ASCENDING).batch_size(2000))
 
     def latest_reading_test(self, file_name: str | None) -> dict[str, Any] | None:
@@ -260,7 +278,7 @@ class MongoRepositories:
         self.db.job_accuracy.replace_one({"job_id": document["job_id"]}, {**document, "saved_at": now()}, upsert=True)
 
     def items_by_rows(self, job_id: str, row_numbers: list[int]) -> list[dict[str, Any]]:
-        projection = {"_id": 0, "row_number": 1, "item_no": 1, "group": 1, "original": 1, "field_proposals": 1,
+        projection = {"_id": 0, "row_number": 1, "item_no": 1, "route": 1, "group": 1, "original": 1, "field_proposals": 1,
                       "application_policy": 1, "reason_code": 1, "findings": 1, "changes": 1, "method": 1,
                       "context": 1, "review.overall_status": 1, "review.override_values": 1}
         return list(self.db.job_items.find({"job_id": job_id, "row_number": {"$in": row_numbers}}, projection).sort("row_number", ASCENDING))
@@ -372,6 +390,7 @@ class MongoRepositories:
             "_id": 0,
             "row_number": 1,
             "item_no": 1,
+            "route": 1,
             "group": 1,
             "original": 1,
             "field_proposals": 1,
@@ -381,6 +400,7 @@ class MongoRepositories:
             "application_policy": 1,
             "findings": 1,
             "changes": 1,
+            "field_provenance": 1,
             "method": 1,
             "reason_code": 1,
             "result_ledger_version": 1,
@@ -389,7 +409,7 @@ class MongoRepositories:
 
     def quality_items(self, job_id: str) -> list[dict[str, Any]]:
         projection = {
-            "_id": 0, "row_number": 1, "item_no": 1, "group": 1, "original": 1,
+            "_id": 0, "row_number": 1, "item_no": 1, "route": 1, "group": 1, "original": 1,
             "context": 1, "findings.code": 1, "findings.human_reason": 1,
             "reason_code": 1, "pack_result.status": 1, "application_policy": 1,
             "review.overall_status": 1, "field_proposals": 1, "rule.rule_id": 1,

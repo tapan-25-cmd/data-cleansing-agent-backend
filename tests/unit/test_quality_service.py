@@ -16,10 +16,10 @@ def service() -> QualityService:
     return QualityService(load_default_registry())
 
 
-def item(item_no="1", *, group="A", legacy=("1", "KG"), klm=("1000", "GM", "1"),
+def item(item_no="1", *, route="A", legacy=("1", "KG"), klm=("1000", "GM", "1"),
          desc=None, policy="NO_CHANGE", findings=(), reason=None, pack_status=None):
     return {
-        "item_no": item_no, "row_number": int(item_no) + 1, "group": group,
+        "item_no": item_no, "row_number": int(item_no) + 1, "route": route,
         "original": {
             "legacy_size": legacy[0], "legacy_uom": legacy[1],
             "standard_size": klm[0], "standard_uom": klm[1], "standard_pack_size": klm[2],
@@ -66,7 +66,7 @@ def test_matches_count_as_agreement_and_disagreements_wait_for_a_decision():
         item("4", legacy=("10", "PC"), klm=("200", "GM", "1")),      # EA vs GM: different kind
         item("5", legacy=("4.5", "GM"), klm=("4.5", "GM", "1")),     # identity keeps decimals
         item("6", legacy=("16", "ST"), klm=("473", "ML", "1")),      # no rule: not tested
-        item("7", group="B", legacy=("1", "KG"), klm=("1", "KG", None)),  # not an answer key
+        item("7", route="B", legacy=("1", "KG"), klm=("1", "KG", None)),  # not an answer key
     ])
 
     unit = capability(report, "unit_conversion")
@@ -124,10 +124,10 @@ def test_ai_reading_is_reported_as_not_measured_with_the_available_sample():
 def test_workload_is_plain_language_and_shares_exclude_purged_rows():
     report = service().build_report({}, [
         item("1"), item("2", policy="OBSERVATION_ONLY"),
-        item("3", group="B", policy="AUTO_APPLY"),
+        item("3", route="B", policy="AUTO_APPLY"),
         item("4", policy="REVIEW_REQUIRED", findings=["PACKAGING_HIERARCHY_AMBIGUOUS"]),
-        item("5", group="C", policy="UNRESOLVED", legacy=(None, None), klm=(None, None, None)),
-        item("6", group="SKIPPED_PURGED"),
+        item("5", route="C", policy="UNRESOLVED", legacy=(None, None), klm=(None, None, None)),
+        item("6", route="SKIPPED_PURGED"),
     ])
     workload = {row["key"]: (row["products"], row["share_percent"]) for row in report["workload"]}
     assert workload == {
@@ -194,9 +194,9 @@ def test_a_whole_pack_total_is_an_honest_miss():
     assert (unit["misses"], unit["scored"], unit["accuracy_percent"]) == (1, 2, 50.0)
 
 
-def produced(item_no, *, group="B", before=("1", "KG"), legacy=("1", "KG"), result=("1000", "GM"),
+def produced(item_no, *, route="B", before=("1", "KG"), legacy=("1", "KG"), result=("1000", "GM"),
              desc=None, policy="AUTO_APPLY", rule="KG_TO_GM", verification=None, review="NOT_REQUIRED"):
-    row = item(item_no, group=group, legacy=legacy, klm=(before[0], before[1], "1"), desc=desc, policy=policy)
+    row = item(item_no, route=route, legacy=legacy, klm=(before[0], before[1], "1"), desc=desc, policy=policy)
     row["field_proposals"] = {"standard_size": result[0], "standard_uom": result[1], "standard_pack_size": None}
     row["rule"] = {"rule_id": rule}
     row["verification"] = verification
@@ -249,9 +249,9 @@ def test_reviewer_verdicts_take_over_the_headline_once_there_are_enough():
 
 def test_acting_on_a_suggestion_counts_as_a_verdict():
     rows = [
-        produced("1", group="A", policy="REVIEW_REQUIRED", rule="LEGACY_COMPARISON", review="APPROVED"),
-        produced("2", group="A", policy="REVIEW_REQUIRED", rule="LEGACY_COMPARISON", review="OVERRIDDEN"),
-        produced("3", group="A", policy="REVIEW_REQUIRED", rule="LEGACY_COMPARISON", review="PENDING"),
+        produced("1", route="A", policy="REVIEW_REQUIRED", rule="LEGACY_COMPARISON", review="APPROVED"),
+        produced("2", route="A", policy="REVIEW_REQUIRED", rule="LEGACY_COMPARISON", review="OVERRIDDEN"),
+        produced("3", route="A", policy="REVIEW_REQUIRED", rule="LEGACY_COMPARISON", review="PENDING"),
     ]
     suggested = result_row(service().build_report({}, rows), "SUGGESTED_SIZE")
     assert (suggested["results"], suggested["verified"], suggested["verified_correct"]) == (3, 2, 1)
@@ -324,9 +324,9 @@ def test_label_rounding_counts_as_the_same_answer():
 
 
 def test_safety_checks_and_engine_are_reported_in_plain_language():
-    guarded = item("1", group="B", policy="REVIEW_REQUIRED")
+    guarded = item("1", route="B", policy="REVIEW_REQUIRED")
     guarded["guards"] = [{"code": "OUNCE_MAY_BE_FLUID", "message": "9 OZ could be a weight (255 GM) or fluid ounces (266 ML)."}]
-    noted = item("2", group="B", policy="AUTO_APPLY")
+    noted = item("2", route="B", policy="AUTO_APPLY")
     noted["guards"] = [{"code": "COUNT_IN_MEASURED_CATEGORY", "message": "Only a count."}]
     job = {"ruleset_version": "poc-v3", "validation_policy": {"guards_version": "guards-v1"},
            "ai_reading_test": {"status": "COMPLETED", "prompt_version": "uom-inference-v2", "score": None}}

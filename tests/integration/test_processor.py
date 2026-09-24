@@ -77,9 +77,10 @@ def test_processor_routes_rules_and_ai_without_crossing_paths(tmp_path: Path):
     assert repository.job["status"] == "READY_FOR_REVIEW"
     assert repository.job["stats"] == {
         "workbook_rows": 5, "department_rows": 4, "purged": 1, "live": 3,
-        "group_a": 1, "group_b": 1, "group_b1": 1, "group_b2": 0,
-        "group_b3": 0, "group_c": 1, "validation_review": 0,
-        "group_a_validation_warnings": 0,
+        "groups": {"A": 1, "B": 1, "C": 1, "PURGED": 1},
+        "route_a": 1, "route_b": 1, "route_b1": 1, "route_b2": 0,
+        "route_b3": 0, "route_c": 1, "route_incomplete": 0, "validation_review": 0,
+        "route_a_validation_warnings": 0,
         "data_shape_error": 0, "discrepancies": 0,
         "discrepancy_bilingual_measurement_conflicts": 0,
         "discrepancy_bilingual_count_conflicts": 0,
@@ -88,10 +89,10 @@ def test_processor_routes_rules_and_ai_without_crossing_paths(tmp_path: Path):
         "pack_agent_declined": 1, "pack_conflict": 0, "pack_not_found": 1,
         "pack_agent_error": 0, "pack_agent_disabled": 0,
         "pack_invalid_existing": 0,
-        "group_b_pack_deterministic_proposed": 0,
-        "group_b_pack_agent_proposed": 0,
-        "group_c_pack_deterministic_proposed": 0,
-        "group_c_pack_agent_proposed": 0,
+        "route_b_pack_deterministic_proposed": 0,
+        "route_b_pack_agent_proposed": 0,
+        "route_c_pack_deterministic_proposed": 0,
+        "route_c_pack_agent_proposed": 0,
     }
     by_item = {item["item_no"]: item for item in repository.items}
     assert by_item["000003"]["method"] == "RULE"
@@ -194,7 +195,7 @@ def test_group_a_gate_normalizes_aliases_and_rejects_invalid_values(tmp_path: Pa
 
     by_item = {item["item_no"]: item for item in repository.items}
     normalized = by_item["000101"]
-    assert normalized["group"] == "B"
+    assert normalized["route"] == "B"
     assert normalized["reason_code"] == "STANDARD_FIELDS_NORMALIZATION"
     assert normalized["field_proposals"] == {
         "standard_size": None,
@@ -206,7 +207,7 @@ def test_group_a_gate_normalizes_aliases_and_rejects_invalid_values(tmp_path: Pa
     assert normalized["validation"]["status"] == "AUTO_FIX"
 
     numeric_text = by_item["000103"]
-    assert numeric_text["group"] == "B"
+    assert numeric_text["route"] == "B"
     assert numeric_text["field_proposals"] == {
         "standard_size": "500.5",
         "standard_uom": None,
@@ -215,7 +216,7 @@ def test_group_a_gate_normalizes_aliases_and_rejects_invalid_values(tmp_path: Pa
     assert numeric_text["rule"]["rounding_decimals"] is None
 
     invalid = by_item["000102"]
-    assert invalid["group"] == "DATA_SHAPE_ERROR"
+    assert invalid["route"] == "DATA_SHAPE_ERROR"
     assert invalid["reason_code"] == "GROUP_A_VALIDATION_INVALID"
     assert invalid["validation"]["status"] == "INVALID"
 
@@ -445,7 +446,7 @@ def test_count_conflict_requires_review_without_changing_the_group(tmp_path: Pat
     JobProcessor(repository, storage, load_default_registry(), MockInferenceProvider()).process(job_id)
 
     item = repository.items[0]
-    assert item["group"] == "A"
+    assert item["route"] == "A"
     assert item["discrepancy"]["flagged"] is True
     assert item["application_policy"] == "REVIEW_REQUIRED"
     assert item["review"]["overall_status"] == "PENDING"
@@ -577,8 +578,67 @@ def test_a_pack_count_of_one_that_matches_the_legacy_needs_no_confirmation(tmp_p
         "item_desc_local_lang": "利苑清香馬蹄糕禮券1PC", "item_size_value": 1, "item_size_unit": "PC",
     }], provider=OnePieceVoucherProvider())
     item = repository.items[0]
-    assert item["group"] == "B"
+    assert item["route"] == "B"
     assert item["field_proposals"]["standard_size"] == "1" and item["field_proposals"]["standard_uom"] == "EA"
     assert item["field_proposals"]["standard_pack_size"] == "1"
     assert "AI_PACK_NEEDS_CONFIRMATION" not in {g["code"] for g in item["guards"]}
     assert item["application_policy"] == "AUTO_APPLY"
+
+
+def test_a_half_filled_row_is_completed_where_the_values_are_found_and_raised_where_not(tmp_path: Path):
+    from app.services.result_status import describe
+
+    department = "03_Grocery 2"
+    rows = [
+        # Unit missing: the old size 500 G equals the size, so the unit is GM.
+        {"Item_no": "1", "item_desc_eng": "SUGAR", "item_size_value": 500, "item_size_unit": "G",
+         "Standardize Unit Size": 500},
+        # Size missing: the old size 1 L converts to 1000 ML.
+        {"Item_no": "2", "item_desc_eng": "MILK", "item_size_value": 1, "item_size_unit": "L",
+         "Standardize UOM": "ML", "Standardize Pack Size": 1},
+        # Size missing, no old size: the description states 200G.
+        {"Item_no": "3", "item_desc_eng": "COOKIES 200G", "Standardize UOM": "GM"},
+        # Size missing and stated nowhere: raised.
+        {"Item_no": "4", "item_desc_eng": "COOKIES", "Standardize UOM": "GM"},
+        # A value that cannot be used: raised.
+        {"Item_no": "5", "item_desc_eng": "RICE", "Standardize Unit Size": "abc"},
+        # Pack missing: the description says X 6.
+        {"Item_no": "6", "item_desc_eng": "JUICE 250ML X 6", "Standardize Unit Size": 250,
+         "Standardize UOM": "ML"},
+        # Unit missing: the old size 6000 G is exactly 500 × 12, so the unit is GM.
+        {"Item_no": "7", "item_desc_eng": "FLOUR", "item_size_value": 6000, "item_size_unit": "G",
+         "Standardize Unit Size": 500, "Standardize Pack Size": 12},
+        # Size missing with a pack of 4: 1 KG may be the whole pack, so it is only suggested.
+        {"Item_no": "9", "item_desc_eng": "TEA", "item_size_value": 1, "item_size_unit": "KG",
+         "Standardize UOM": "GM", "Standardize Pack Size": 4},
+        # A complete row whose description states a different size: raised, nothing changed.
+        {"Item_no": "8", "item_desc_eng": "OIL 900G", "Standardize Unit Size": 500,
+         "Standardize UOM": "GM", "Standardize Pack Size": 1},
+    ]
+    repository = run_rows(tmp_path, [{"Department": department, **row} for row in rows])
+    by_item = {item["item_no"]: describe(dict(item)) for item in repository.items}
+
+    def outcome(item_no):
+        item = by_item[item_no]
+        return item["route"], item["group"], item["field_proposals"]
+
+    assert outcome("1") == ("INCOMPLETE", "B", {"standard_size": None, "standard_uom": "GM", "standard_pack_size": "1"})
+    assert by_item["1"]["how"] == "Old size, unit table + Pack rule: single item"
+    assert outcome("2") == ("INCOMPLETE", "B", {"standard_size": "1000", "standard_uom": None, "standard_pack_size": None})
+    assert outcome("3") == ("INCOMPLETE", "B", {"standard_size": "200", "standard_uom": None, "standard_pack_size": "1"})
+    assert by_item["3"]["how"] == "Read from the description + Pack rule: single item"
+    assert outcome("4")[:2] == ("INCOMPLETE", "C")
+    assert "GAP_NOT_FOUND" in {f["code"] for f in by_item["4"]["findings"]}
+    assert outcome("5")[:2] == ("INCOMPLETE", "C")
+    assert "UNUSABLE_VALUE" in {f["code"] for f in by_item["5"]["findings"]}
+    assert outcome("6") == ("INCOMPLETE", "B", {"standard_size": None, "standard_uom": None, "standard_pack_size": "6"})
+    assert outcome("7") == ("INCOMPLETE", "B", {"standard_size": None, "standard_uom": "GM", "standard_pack_size": None})
+    assert outcome("9") == ("INCOMPLETE", "C", {"standard_size": "1000", "standard_uom": None, "standard_pack_size": None})
+    assert "GAP_SUGGESTED" in {f["code"] for f in by_item["9"]["findings"]}
+    assert outcome("8") == ("A", "C", {"standard_size": None, "standard_uom": None, "standard_pack_size": None})
+    assert "DESCRIPTION_SIZE_DIFFERS" in {f["code"] for f in by_item["8"]["findings"]}
+    # A suggestion is never written until a person approves it.
+    suggested = next(c for c in by_item["9"]["changes"] if c["field"] == "standard_size")
+    assert (suggested["proposed"], suggested["final"]) == ("1000", None)
+    assert repository.job["stats"]["groups"] == {"A": 0, "B": 5, "C": 4, "PURGED": 0}
+    assert repository.job["stats"]["route_incomplete"] == 8
