@@ -35,6 +35,7 @@ class MongoRepositories:
         self.db.job_items.create_index([("job_id", ASCENDING), ("rule.rule_id", ASCENDING)])
         self.db.open_question_answers.create_index("category", unique=True)
         self.db.job_accuracy.create_index("job_id", unique=True)
+        self.db.blind_tests.create_index([("job_id", ASCENDING), ("kind", ASCENDING)], unique=True)
         self.db.lane_a_trials.create_index([("job_id", ASCENDING), ("saved_at", DESCENDING)])
         self.db.lane_a_trial_rows.create_index([("job_id", ASCENDING), ("run_id", ASCENDING), ("row_number", ASCENDING)], unique=True)
         self.db.job_comparisons.create_index(
@@ -245,6 +246,12 @@ class MongoRepositories:
         test = job["ai_reading_test"]
         return {"job_id": job["job_id"], "finished_at": test.get("finished_at"), "prompt_version": test.get("prompt_version"),
                 "score": test.get("score")}
+
+    def save_blind_test(self, document: dict[str, Any]) -> None:
+        self.db.blind_tests.replace_one({"job_id": document["job_id"], "kind": document["kind"]}, {**document, "saved_at": now()}, upsert=True)
+
+    def blind_tests(self, job_id: str) -> dict[str, dict[str, Any]]:
+        return {d["kind"]: public(d) for d in self.db.blind_tests.find({"job_id": job_id})}
 
     def job_accuracy(self, job_id: str) -> dict[str, Any] | None:
         return public(self.db.job_accuracy.find_one({"job_id": job_id}))

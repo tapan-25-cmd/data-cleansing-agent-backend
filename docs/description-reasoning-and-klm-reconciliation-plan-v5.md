@@ -463,3 +463,30 @@ Reader contract (`provider.py`): a `pair_interpretations.conclusion` longer than
 is trimmed instead of rejected, and a reason code that disagrees with the status is replaced by
 the one the status implies. Both used to cost a schema-repair retry (seen as ADK tracebacks in
 the server log on job 46faa97e, which still completed with 0 invalid responses).
+
+## 17. Blind tests (24 September 2026)
+
+Sub-tab under Accuracy (`/jobs/{id}/blind-test`, `app/services/blind_test_service.py`, store
+`blind_tests`, API `GET /jobs/{id}/blind-test`, `/{kind}/rows`, `POST /{kind}/run`). The answer
+exists before the tool runs and is hidden from it; nothing changes a row.
+
+- **Group B, conversion test** (no AI): complete Group A products whose older field is in
+  another unit; K/L/M hidden; the unit table's output compared with the team's value. Job
+  9ea8ad60: 1,112 needed a conversion; 859 exact + 120 whole-pack = 979 reproduce the team's
+  value; 100 differ (37 OZ → GM where the team used the fluid reading, 7 LB, and 53 where the
+  team's unit is a different kind from the older field's); 33 use units the table does not know
+  (BX, SET, RL, BG, ST, PA, CT, CP). Same unit: 10,586 of 10,630 copy across unchanged.
+  Pack sizes above 1: 1,033 of 1,203 are written in the description.
+- **Group A, seeded-error test** (no AI): 2,000 evenly spaced clean products, each broken in
+  up to six realistic ways, run through the Group A check. 7,701 of 7,955 seeded errors caught
+  (sent to a person); unit swapped 1,849/1,849; decimal shift 1,849/1,849; digit typo
+  1,985/2,000; size-as-total 179/204 (25 noted only); off by one gram 1,795/1,849 (same-unit
+  legacy must match exactly); pack off by one 44/204, the rest noted only: a wrong pack size is
+  detectable only when the description states the count, because the older field carries the
+  unit size alone. Untouched copies flagged: 5 of 2,000.
+- **Group C, reading test**: positive half is the existing AI reading test (353 of 370);
+  negative half (`C_SILENT`, one call per product) shows the reader 200 products whose
+  descriptions state no size and expects "nothing written". Not yet run on this job.
+
+Both free tests were run from a standalone process; runs triggered through the dev server with
+`--reload` were cancelled mid-way (`_OperationCancelled`) when the worker restarted.
