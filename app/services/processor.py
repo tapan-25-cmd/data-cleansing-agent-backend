@@ -718,9 +718,12 @@ class JobProcessor:
                         "provider": response.metadata.model_dump(mode="json"),
                     }
                     item["evidence"].append(result.pack_evidence.model_dump())
-                    item["guards"].append(guards.ai_pack_needs_confirmation(
-                        result.pack_size, result.pack_evidence.fragment,
-                    ))
+                    if not guards.pack_count_is_settled(
+                        result.pack_size, item["original"].get("legacy_size"), item["original"].get("legacy_uom"),
+                    ):
+                        item["guards"].append(guards.ai_pack_needs_confirmation(
+                            result.pack_size, result.pack_evidence.fragment,
+                        ))
                 else:
                     item["pack_result"]["status"] = "AGENT_DECLINED"
                     item["pack_result"]["reason_code"] = (
@@ -889,9 +892,12 @@ class JobProcessor:
                         "provider": response.metadata.model_dump(mode="json"),
                     }
                     item["evidence"].append(result.pack_evidence.model_dump())
-                    item["guards"].append(guards.ai_pack_needs_confirmation(
-                        result.pack_size, result.pack_evidence.fragment,
-                    ))
+                    if not guards.pack_count_is_settled(
+                        result.pack_size, item["original"].get("legacy_size"), item["original"].get("legacy_uom"),
+                    ):
+                        item["guards"].append(guards.ai_pack_needs_confirmation(
+                            result.pack_size, result.pack_evidence.fragment,
+                        ))
                 pack_status = (item.get("pack_result") or {}).get("status")
                 if (
                     self.pack_size_inference_enabled

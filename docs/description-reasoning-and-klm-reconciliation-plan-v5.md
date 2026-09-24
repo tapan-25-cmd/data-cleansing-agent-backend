@@ -490,3 +490,13 @@ exists before the tool runs and is hidden from it; nothing changes a row.
 
 Both free tests were run from a standalone process; runs triggered through the dev server with
 `--reload` were cancelled mid-way (`_OperationCancelled`) when the worker restarted.
+
+### 17a. Pack count of one needs no confirmation (24 September 2026)
+
+Seven vouchers (legacy 1 PC, Chinese description ending in 1PC) were sent to a person only
+because the reader had read the pack count "1" from the text and every AI-read pack count
+triggered `AI_PACK_NEEDS_CONFIRMATION`; three sibling vouchers with identical text were applied
+automatically because the reader happened to decline. `guards.pack_count_is_settled`: a pack
+count read from the text needs no confirmation when it is 1, or when it equals the piece count
+the legacy field already holds. Those seven now apply as 1 EA × 1; the two coupons where the
+count could be contents (12S, 4PC) still go to a person. v0.2 group counts unchanged.

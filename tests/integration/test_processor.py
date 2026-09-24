@@ -557,3 +557,28 @@ def test_a_contents_count_is_not_written_as_the_pack_size(tmp_path: Path):
     assert "AI_PACK_NEEDS_CONFIRMATION" in [f["code"] for f in sellable["findings"]]
     pack = next(c for c in sellable["changes"] if c["field"] == "standard_pack_size")
     assert (pack["proposed"], pack["final"]) == ("8", None)
+
+
+class OnePieceVoucherProvider:
+    """Reads the pack count 1 from “1PC”, the way the live reader does on vouchers."""
+    async def infer(self, request):
+        from app.agents.provider import Evidence, InferenceResponse, InferenceResult, ProviderMetadata
+        if request.task == "PACK_ONLY":
+            result = InferenceResult(status="PACK_PROPOSAL", pack_size=1, pack_role="SELLABLE_PACK",
+                                     pack_evidence=Evidence(field="item_desc_local_lang", fragment="1PC"), rationale="one voucher", confidence="HIGH")
+        else:
+            result = InferenceResult(status="NOT_IN_DESCRIPTION", rationale="no size")
+        return InferenceResponse(result=result, metadata=ProviderMetadata(provider="mock", agent_name="t", agent_version="1", prompt_version="v", prompt_sha256="x", model_id="m", adk_version="1", attempt_count=1, latency_ms=1))
+
+
+def test_a_pack_count_of_one_that_matches_the_legacy_needs_no_confirmation(tmp_path: Path):
+    repository = run_rows(tmp_path, [{
+        "Item_no": "231076", "Department": "03_Grocery 2", "item_desc_eng": "WATER CHESTNUT P V",
+        "item_desc_local_lang": "利苑清香馬蹄糕禮券1PC", "item_size_value": 1, "item_size_unit": "PC",
+    }], provider=OnePieceVoucherProvider())
+    item = repository.items[0]
+    assert item["group"] == "B"
+    assert item["field_proposals"]["standard_size"] == "1" and item["field_proposals"]["standard_uom"] == "EA"
+    assert item["field_proposals"]["standard_pack_size"] == "1"
+    assert "AI_PACK_NEEDS_CONFIRMATION" not in {g["code"] for g in item["guards"]}
+    assert item["application_policy"] == "AUTO_APPLY"

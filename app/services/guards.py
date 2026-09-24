@@ -6,7 +6,7 @@ Each guard is small, versioned and tested on its own; see docs/agent-intelligenc
 """
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
 from app.services.category_profile import CategoryProfile, CategoryView
@@ -67,6 +67,20 @@ _ROLE_WORDS = {
     "NAME_OR_GRADE": "part of the product's name or grade",
     "UNCLEAR": "something the AI could not identify",
 }
+
+
+def pack_count_is_settled(pack_size: Decimal, legacy_size: object, legacy_uom: str | None) -> bool:
+    """A pack count read from the text needs no confirmation when there is nothing to
+    decide: it is 1, or it is the same count the legacy field already holds in pieces
+    (legacy 1 PC with text "1PC"). Only a count that could be contents rather than the
+    pack sold ("12PCS COUPON") is worth a person's time."""
+    if pack_size == Decimal("1"):
+        return True
+    try:
+        legacy = Decimal(str(legacy_size))
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    return str(legacy_uom or "").strip().upper() in COUNT_UNITS and legacy == pack_size
 
 
 def ai_pack_needs_confirmation(pack_size: Decimal, fragment: str) -> dict[str, Any]:
