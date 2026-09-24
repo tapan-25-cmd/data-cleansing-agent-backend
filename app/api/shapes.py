@@ -18,14 +18,16 @@ FIELDS = [
 ]
 
 GROUPS = {
-    "A": {"name": "Group A · Already filled in", "story": "The three boxes K, L and M are all filled. The tool does not write anything here. It only checks whether the numbers make sense against the old size and the product's own words, and raises a hand when they do not.",
-          "kid": "Like homework that is already done: the teacher only marks it."},
-    "B": {"name": "Group B · Fill in from the old size", "story": "K and L are empty but the old size and unit exist. The tool converts the old size into the standard unit with a fixed table, for example 1 KG becomes 1000 GM, and writes it in.",
-          "kid": "Like copying an answer from your old notebook, but in the new language."},
-    "C": {"name": "Group C · Read the words", "story": "There is no old size to convert and K and L are empty. The only clue is the product's description, so the tool reads it and writes down a size only if one is literally written there.",
-          "kid": "Like finding the answer written on the box, and writing nothing if the box says nothing."},
-    "INVALID": {"name": "Invalid row · Half filled", "story": "Only one or two of K, L and M are filled. The row is neither complete enough to check nor empty enough to fill in, so it is reported back as it is.",
-                "kid": "Like a form with a name but no address: we send it back rather than guess."},
+    "A": {"name": "Group A · Already filled in",
+          "story": "Size, unit and pack are all filled in. The tool does not change them. It checks them against the old size and the product description, and asks a person when something does not match."},
+    "B": {"name": "Group B · Filled in from the old size",
+          "story": "Size and unit are empty, but the old system has a size and unit. The tool converts it with a fixed table, for example 1 KG becomes 1000 GM, and fills it in."},
+    "C": {"name": "Group C · Read from the description",
+          "story": "There is no old size to use. The tool reads the product description and fills in a size only if one is written there. If nothing is written, it leaves the row empty."},
+    "PURGED": {"name": "Purged · Skipped",
+               "story": "The product is marked as purged in the workbook and has no details. It is checked first, before any other rule, and skipped. Nothing is read or changed, and it comes back in the download exactly as it was."},
+    "INVALID": {"name": "Incomplete row",
+                "story": "Only part of size, unit and pack is filled in. The tool does not guess the rest. It marks the row so someone can complete it."},
 }
 
 

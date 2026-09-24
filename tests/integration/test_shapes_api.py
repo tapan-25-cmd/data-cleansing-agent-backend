@@ -15,4 +15,4 @@ def test_every_shape_has_a_group_and_the_rules_match_the_classifier():
     assert by[(False, False, False, False, False)]["group"] == "C"
     assert by[(True, False, False, False, False)]["group"] == "C"
     assert by[(True, True, True, True, False)]["group"] == "INVALID"
-    assert set(body["groups"]) == {"A", "B", "C", "INVALID"}
+    assert set(body["groups"]) == {"A", "B", "C", "INVALID", "PURGED"}
