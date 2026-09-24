@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents.chat_coordinator import ChatCoordinator
 from app.agents.factory import create_inference_provider
-from app.api import chat, evaluations, export, jobs, quality, review, open_questions, rules, reasoning, accuracy, blind_test
+from app.api import chat, evaluations, export, jobs, quality, review, open_questions, rules, reasoning, accuracy, blind_test, shapes
 from app.config import get_settings
 from app.repositories.mongo import MongoRepositories
 from app.rules.registry import load_default_registry
@@ -74,6 +74,7 @@ app.include_router(rules.router, prefix=settings.api_prefix)
 app.include_router(reasoning.router, prefix=settings.api_prefix)
 app.include_router(accuracy.router, prefix=settings.api_prefix)
 app.include_router(blind_test.router, prefix=settings.api_prefix)
+app.include_router(shapes.router, prefix=settings.api_prefix)
 
 
 @app.get("/health")
