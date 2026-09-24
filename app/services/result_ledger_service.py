@@ -140,6 +140,16 @@ _FINDING_METADATA = {
         "INFO",
         "Agent found no explicit size or UOM",
     ),
+    "LEGACY_SIZE_MISSING": (
+        "VALIDATION",
+        "INFO",
+        "The legacy field has a unit but no size",
+    ),
+    "INCOMPLETE_ROW": (
+        "VALIDATION",
+        "ERROR",
+        "The row is incomplete and cannot be checked or filled",
+    ),
     "UNMAPPED_SOURCE_UOM": (
         "INSUFFICIENT_EVIDENCE",
         "INFO",
@@ -330,6 +340,19 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
         }))
         issue_codes.add("PACK_SIZE_SINGLE_ITEM")
 
+    if item.get("group") == "DATA_SHAPE_ERROR" and "INCOMPLETE_ROW" not in issue_codes:
+        present = [name for field, name in (("standard_size", "size"), ("standard_uom", "unit"), ("standard_pack_size", "pack size")) if original.get(field) not in (None, "")]
+        missing = [name for field, name in (("standard_size", "size"), ("standard_uom", "unit"), ("standard_pack_size", "pack size")) if original.get(field) in (None, "")]
+        findings.append(_finding({
+            "code": "INCOMPLETE_ROW", "field": "standard_size", "severity": "ERROR",
+            "message": (
+                f"Excel has the {' and '.join(present)} but not the {' or '.join(missing)}. A partly filled "
+                "row can be neither checked nor filled in safely, so it is reported as it is."
+            ),
+            "current_value": ", ".join(present) or None,
+        }))
+        issue_codes.add("INCOMPLETE_ROW")
+
     has_proposal = any(proposals.get(field) is not None for field in AUDIT_FIELDS)
     requires_review = bool(issue_codes & REVIEW_CODES)
     no_size = proposals.get("standard_size") is None and proposals.get("standard_uom") is None
@@ -340,16 +363,26 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
     agent_unresolved = item.get("group") == "C" and not has_proposal
     if rule_unresolved and not has_proposal:
         legacy_uom = str(original.get("legacy_uom") or "this unit")
-        findings.append(_finding({
-            "code": "UNMAPPED_SOURCE_UOM",
-            "field": "legacy_uom",
-            "severity": "INFO",
-            "message": (
-                f"The legacy unit {legacy_uom} has no agreed conversion, so the size could "
-                "not be filled in. It was left blank rather than guessed."
-            ),
-            "current_value": legacy_uom,
-        }))
+        if original.get("legacy_size") in (None, ""):
+            findings.append(_finding({
+                "code": "LEGACY_SIZE_MISSING", "field": "legacy_size", "severity": "INFO",
+                "message": (
+                    f"The legacy field has the unit {legacy_uom} but no size, so there is nothing "
+                    "to convert. The row was left blank rather than guessed."
+                ),
+                "current_value": legacy_uom,
+            }))
+        else:
+            findings.append(_finding({
+                "code": "UNMAPPED_SOURCE_UOM",
+                "field": "legacy_uom",
+                "severity": "INFO",
+                "message": (
+                    f"The legacy unit {legacy_uom} has no agreed conversion, so the size could "
+                    "not be filled in. It was left blank rather than guessed."
+                ),
+                "current_value": legacy_uom,
+            }))
         policy = "UNRESOLVED"
     elif agent_unresolved:
         error = str(item.get("reason_code") or "") in {

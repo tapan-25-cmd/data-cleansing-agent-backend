@@ -97,6 +97,7 @@ STATUS_COLUMN = AUDIT_COLUMNS.index("Cleansing Status")
 
 # A background per status, matching the colours used on the Agent performance screen.
 STATUS_FILLS = {
+    "INVALID": "FFF4DEDE",
     "NO_CHANGE": "FFE6F4EA",        # green  - already correct
     "AUTO_APPLY": "FFE4F0FA",       # blue   - a value changed
     "OBSERVATION_ONLY": "FFE2F4F2", # teal   - checked, noted, unchanged
@@ -385,6 +386,11 @@ def _outcome_comment(item: dict[str, object], status: str, original: dict[str, o
     if status == "SKIPPED":
         return (
             "This product record is empty, so it was skipped. Nothing was read or changed."
+        )
+    if status == "INVALID":
+        return (
+            "This row is incomplete: it has some of the standardised values but not all three, "
+            "so it could be neither checked nor filled in. Please complete or clear the row."
         )
     if status == "UNRESOLVED" and str(item.get("group")) == "B":
         unit = original.get("legacy_uom") or "the legacy unit"

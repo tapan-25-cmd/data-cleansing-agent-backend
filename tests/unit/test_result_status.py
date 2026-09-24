@@ -43,7 +43,7 @@ def matches(document, query):
 
 
 def documents():
-    groups = ("A", "B", "C", "VALIDATION_REVIEW", "SKIPPED_PURGED")
+    groups = ("A", "B", "C", "VALIDATION_REVIEW", "SKIPPED_PURGED", "DATA_SHAPE_ERROR")
     policies = (None, "NO_CHANGE", "AUTO_APPLY", "OBSERVATION_ONLY", "REVIEW_REQUIRED", "UNRESOLVED")
     findings = ([], [{"code": "ROUNDING_ONLY_VARIANCE"}],
                 [{"code": "ROUNDING_ONLY_VARIANCE"}, {"code": "LEGACY_UOM_MISMATCH"}])

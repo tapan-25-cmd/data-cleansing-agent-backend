@@ -500,3 +500,14 @@ automatically because the reader happened to decline. `guards.pack_count_is_sett
 count read from the text needs no confirmation when it is 1, or when it equals the piece count
 the legacy field already holds. Those seven now apply as 1 EA × 1; the two coupons where the
 count could be contents (12S, 4PC) still go to a person. v0.2 group counts unchanged.
+
+### 18. Every shape of I/J and K/L/M (24 September 2026)
+
+All 32 combinations of present/missing I, J, K, L, M were run through the pipeline. Rules:
+K, L and M all present → Group A (checked, never rewritten automatically). K and L empty with
+a legacy unit in J → Group B (converted; if I is empty the row is left blank with
+`LEGACY_SIZE_MISSING`, previously mislabelled as an unknown unit). K, L and J all empty →
+Group C (read from descriptions; I without J is unusable and also lands here). Any partial
+K/L/M (one or two of the three) → invalid shape, now its own status `INVALID` with the finding
+`INCOMPLETE_ROW` naming what is present and what is missing; previously such rows were
+labelled "Already correct". The real workbook contains only the full and empty shapes.

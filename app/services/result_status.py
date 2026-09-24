@@ -12,7 +12,7 @@ from typing import Any
 from app.services.result_ledger_service import REVIEW_CODES
 
 # Display order.
-STATUSES = ("NO_CHANGE", "AUTO_APPLY", "OBSERVATION_ONLY", "REVIEW_REQUIRED", "UNRESOLVED", "SKIPPED")
+STATUSES = ("NO_CHANGE", "AUTO_APPLY", "OBSERVATION_ONLY", "REVIEW_REQUIRED", "UNRESOLVED", "INVALID", "SKIPPED")
 
 # One wording for a status, shared by the screen and the exported workbook so the two
 # can never drift apart.
@@ -22,6 +22,7 @@ STATUS_LABELS = {
     "OBSERVATION_ONLY": "Correct — with a note",
     "REVIEW_REQUIRED": "Needs your review",
     "UNRESOLVED": "Could not determine",
+    "INVALID": "Invalid row — incomplete data",
     "SKIPPED": "Skipped — purged",
 }
 
@@ -49,6 +50,9 @@ def group_label(item: dict[str, Any]) -> str:
     return GROUP_LABELS.get(group, group)
 
 _PURGED = {"group": "SKIPPED_PURGED"}
+# Size and unit present but the pack size missing, or a unit without a size: the row
+# cannot be checked or filled and is reported as it is, never guessed.
+_INVALID = {"group": "DATA_SHAPE_ERROR"}
 # Nothing could be worked out: either the AI found no size in the text (C), or the
 # legacy unit has no agreed conversion, so a rule could not fill the blank (B).
 NO_CONVERSION_REASONS = ("NO_RULE", "MALFORMED_VALUE")
@@ -69,6 +73,8 @@ _NEEDS_REVIEW = {"$or": [
 def effective_status(item: dict[str, Any]) -> str:
     if item.get("group") == "SKIPPED_PURGED":
         return "SKIPPED"
+    if item.get("group") == "DATA_SHAPE_ERROR":
+        return "INVALID"
     proposals = item.get("field_proposals") or {}
     no_size = proposals.get("standard_size") is None and proposals.get("standard_uom") is None
     if no_size and (
@@ -88,9 +94,11 @@ def status_query(status: str) -> dict[str, Any]:
     """MongoDB filter selecting exactly the rows ``effective_status`` maps to ``status``."""
     if status == "SKIPPED":
         return dict(_PURGED)
+    if status == "INVALID":
+        return dict(_INVALID)
     if status == "UNRESOLVED":
-        return dict(_UNRESOLVED)
-    not_earlier = [{"$nor": [_PURGED, _UNRESOLVED]}]
+        return {"$and": [{"$nor": [_INVALID]}, _UNRESOLVED]}
+    not_earlier = [{"$nor": [_PURGED, _INVALID, _UNRESOLVED]}]
     if status == "REVIEW_REQUIRED":
         return {"$and": [*not_earlier, _NEEDS_REVIEW]}
     if status == "NO_CHANGE":
