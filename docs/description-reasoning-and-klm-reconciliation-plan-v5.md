@@ -433,3 +433,16 @@ answers rest on" bar (text versus another record), per-group cards with a mini c
 set bars grouped by outcome, a receipt that adds up to the equation, and an "other ways to count
 it" ladder (flags as wrong, not-checkable as wrong, text only, known-answer test). Product lists
 sit behind each set with a witness sentence per product.
+
+### 15b. Accuracy page, final shape (24 September 2026)
+
+Top: overall number and the sum that builds it, then three group tiles as tabs (opens on B).
+Each group, in the same order: what the task was, framed on the workbook columns (I/J, K/L/M,
+the six descriptions) with a worked example; one bar of what happened to every product; three
+ways to read the accuracy, each a question with its number and fraction (1. did the tool do its
+job on every product, 2. can a second source in the file confirm the value, with the products
+that have no second source left out, 3. the strictest reading, where "no second source" is
+described as a fact about the data, never as a tool failure); the products the tool did not
+decide alone, grouped by reason with the products behind each group; then the plain-word steps.
+Group C's second reading is the known-answer test (353 of 370). Nothing on the page calls a
+value "confirmed" unless the product's own words or a second reading state it.
