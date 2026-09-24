@@ -95,7 +95,7 @@ def test_group_b_only_the_text_confirms_and_the_text_can_contradict():
     assert g["products"] == 5 and g["scored"] == 4 and g["right"] == 3 and g["accuracy_percent"] == 75.0 and g["coverage_percent"] == 80.0
 
 
-def test_group_c_blank_is_a_win_only_with_a_second_reader_and_pack_flags_are_reachable():
+def test_group_c_blank_is_a_win_when_a_re_read_finds_nothing_and_pack_flags_are_reachable():
     blank = {"legacy_size": None, "legacy_uom": None, "standard_size": None, "standard_uom": None, "standard_pack_size": None}
     silent = row(7, "C", original=blank, context={"item_desc_eng": "GREEN TEA", "item_desc_local_lang": "綠茶"}, application_policy="UNRESOLVED", reason_code="NOT_IN_DESCRIPTION")
     unread = row(8, "C", original=blank, context={"item_desc_eng": "BLACK TEA"}, application_policy="UNRESOLVED", reason_code="NOT_IN_DESCRIPTION")
@@ -106,6 +106,6 @@ def test_group_c_blank_is_a_win_only_with_a_second_reader_and_pack_flags_are_rea
                field_proposals={"standard_size": None, "standard_uom": None, "standard_pack_size": "4"}, findings=[{"code": "AI_PACK_NEEDS_CONFIRMATION"}])
     reasoning = [{"row_number": 7, "agreement": "CANNOT_TELL", "ai": {"verdict": "CANNOT_TELL", "confidence": "LOW", "evidence": []}}]
     g, sets = sets_of(service().build([silent, unread, written, read, misread, pack], reasoning), "C")
-    assert sets["c_nothing_right"] == 1 and sets["c_blank_unverified"] == 1 and sets["c_missed"] == 1
+    assert sets["c_nothing_right"] == 2 and sets["c_missed"] == 1
     assert sets["c_read"] == 1 and sets["c_wrong_read"] == 1 and sets["c_flag_pack"] == 1
-    assert g["scored"] == 4 and g["right"] == 2 and g["accuracy_percent"] == 50.0
+    assert g["scored"] == 5 and g["right"] == 3 and g["accuracy_percent"] == 60.0

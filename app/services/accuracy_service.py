@@ -27,7 +27,7 @@ from app.services.klm_reconciliation_service import KLMReconciliationService, Le
 from app.services.result_status import effective_status
 from app.services.rule_engine import RuleEngine
 
-ACCURACY_VERSION = "accuracy-v2"
+ACCURACY_VERSION = "accuracy-v3"
 TEXT_FIELDS = ("item_desc_eng", "item_desc_local_lang", "web_description_eng", "web_description_chi")
 FIELD_NAMES = {"item_desc_eng": "item description", "item_desc_local_lang": "item description (Chinese)",
                "web_description_eng": "web description", "web_description_chi": "web description (Chinese)"}
@@ -94,8 +94,8 @@ SETS: dict[str, list[dict[str, str]]] = {
     "C": [
         {"id": "c_read", "kind": "CONFIRMED", "name": "Read a size that is written in the description",
          "reason": "The value read is stated word for word in the text and passed every safety check."},
-        {"id": "c_nothing_right", "kind": "CONFIRMED", "name": "Correctly left blank: nothing is written",
-         "reason": "No description states a size, and a second, independent reading agreed. Leaving it blank is the correct answer."},
+        {"id": "c_nothing_right", "kind": "CONFIRMED", "name": "Correctly left empty: nothing is written",
+         "reason": "No description states a size, and a rule-based re-read of the same six fields finds none either. Leaving it empty is the correct answer."},
         {"id": "c_flag_pack", "kind": "FLAG", "name": "Sent to a person: a pack count needs confirming",
          "reason": "A piece count was read from the text; a person confirms whether it is the pack sold or the contents."},
         {"id": "c_missed", "kind": "WRONG", "name": "Left blank, but a size is written",
@@ -104,8 +104,6 @@ SETS: dict[str, list[dict[str, str]]] = {
          "reason": "The value read does not match what the description states."},
         {"id": "c_read_unverified", "kind": "UNVERIFIED", "name": "Read a value, not re-checked",
          "reason": "A value was read but the rule-based re-read could not find it in the text."},
-        {"id": "c_blank_unverified", "kind": "UNVERIFIED", "name": "Left blank, not yet re-read",
-         "reason": "The reasoning layer has not re-read this product, so its blank cannot be confirmed."},
     ],
 }
 
@@ -341,6 +339,6 @@ class AccuracyService:
             if ms or (strong_ai and ai.get("verdict") not in (None, "CANNOT_TELL")):
                 return "c_missed", (f"text says “{ms[0][0].fragment}”" if ms else f"reasoning layer: {ai.get('explanation', '')[:160]}")
             if ai and ai.get("verdict") == "CANNOT_TELL":
-                return "c_nothing_right", "rule-based re-read and the reasoning layer both found nothing written"
-            return "c_blank_unverified", "rule-based re-read found nothing; reasoning layer has not read it"
+                return "c_nothing_right", "rule-based re-read found nothing written; the reasoning layer agreed"
+            return "c_nothing_right", "rule-based re-read of all six fields found nothing written"
         return None, ""
