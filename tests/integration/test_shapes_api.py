@@ -25,3 +25,19 @@ def test_every_shape_has_a_method_and_the_groups_it_can_end_in():
     assert Counter(r["route"] for r in body["rows"]) == {"A": 4, "B": 4, "C": 4, "INCOMPLETE": 20}
     assert set(body["groups"]) == {"A", "B", "C", "PURGED"}
     assert set(body["routes"]) == {"A", "B", "C", "INCOMPLETE"}
+
+
+def test_the_sequence_document_is_served_and_every_diagram_is_mermaid():
+    from app.api import rules
+
+    app = FastAPI(); app.include_router(rules.router, prefix="/api")
+    body = TestClient(app).get("/api/rules/sequence").json()
+    assert body["path"] == "docs/pipeline-sequence.md"
+    text = body["markdown"]
+    assert text.startswith("# Pipeline sequence")
+    assert text.count("```mermaid") >= 10 and "sequenceDiagram" in text and "stateDiagram-v2" in text
+    # The tables name every collection the code writes to.
+    for collection in ("jobs", "job_items", "job_accuracy", "job_comparisons", "job_comparison_rows",
+                       "open_question_answers", "blind_tests", "ai_reading_results", "agent_evaluations",
+                       "lane_a_trials"):
+        assert f"`{collection}`" in text
