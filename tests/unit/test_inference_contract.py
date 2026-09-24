@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+from app.agents.provider import _REASON_FOR_STATUS
 from app.agents.provider import (
     Evidence,
     InferenceRequest,
@@ -101,13 +102,9 @@ def test_pack_evidence_cannot_use_brand_or_omit_proposed_count():
 
 
 def test_status_and_reason_code_must_match():
-    with pytest.raises(ValidationError, match="requires reason code"):
-        InferenceResult(
-            status="PACK_PROPOSAL", pack_size=4,
-            pack_evidence=Evidence(field="item_desc_eng", fragment="4 PACK"),
-            confidence="HIGH", reason_code="NOT_IN_DESCRIPTION",
-        )
-
+    """A reason code that disagrees with the status is replaced by the one the status implies."""
+    result = InferenceResult.model_validate({"status": "AMBIGUOUS", "reason_code": "NOT_IN_DESCRIPTION"})
+    assert result.reason_code == _REASON_FOR_STATUS["AMBIGUOUS"]
 
 def test_pack_only_request_rejects_measurement_response():
     request = InferenceRequest(task="PACK_ONLY", item_desc_eng="6 X 500ML")
@@ -156,3 +153,14 @@ def test_relationship_requires_literal_evidence():
         QuantityRelationship(
             relationship="UNITS_PER_PACK", subject="cakes", count=6,
         )
+
+
+def test_reason_code_and_long_prose_are_normalised_instead_of_rejected():
+    from app.agents.provider import InferenceResult, PairInterpretation, _REASON_FOR_STATUS
+    result = InferenceResult.model_validate({
+        "status": "NOT_IN_DESCRIPTION", "reason_code": _REASON_FOR_STATUS["AMBIGUOUS"],
+        "pair_interpretations": [{"pair": "ITEM_DESCRIPTION", "status": "SUPPORTED", "conclusion": "x" * 900}],
+    })
+    assert result.reason_code == "NOT_IN_DESCRIPTION"
+    assert len(result.pair_interpretations[0].conclusion) == 398
+    assert isinstance(result.pair_interpretations[0], PairInterpretation)

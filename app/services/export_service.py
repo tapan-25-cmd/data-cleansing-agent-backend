@@ -328,6 +328,11 @@ def _finding_comment(finding: dict[str, object], original: dict[str, object]) ->
             "match none of them. Confirm whether the size is per packet, per inner pack, "
             "or per case."
         )
+    if code == "PACK_SIZE_SINGLE_ITEM":
+        return (
+            "No pack count is written anywhere, so the product is recorded as a single item "
+            "with pack size 1."
+        )
     if code == "LINKED_SIZE_AND_PACK_SUGGESTION" and current and expected:
         proposed = dict(finding.get("proposed") or {})
         suggestion = (

@@ -6,7 +6,7 @@ from typing import Any
 from app.services.guards import GUARD_REVIEW_CODES
 
 
-RESULT_LEDGER_VERSION = "result-ledger-v4"
+RESULT_LEDGER_VERSION = "result-ledger-v5"
 AUDIT_FIELDS = ("standard_size", "standard_uom", "standard_pack_size")
 
 _FINDING_METADATA = {
@@ -34,6 +34,11 @@ _FINDING_METADATA = {
         "SOURCE_DISCREPANCY",
         "REVIEW",
         "The description's count differs from Excel's pack size",
+    ),
+    "PACK_SIZE_SINGLE_ITEM": (
+        "PACKAGING_HIERARCHY",
+        "INFO",
+        "Recorded as a single item: pack size 1",
     ),
     "DESCRIPTION_CONFIRMS_PIECE_COUNT": (
         "SOURCE_AGREEMENT",
@@ -295,6 +300,35 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
             "rule_id": "LEGACY_COMPARISON",
             "policy_version": RESULT_LEDGER_VERSION,
         }
+
+    # A Group B conversion that found no pack count anywhere is a single item. Writing
+    # it as size + unit with the pack size blank would be an incomplete tuple that the
+    # workbook's own rules reject on the next read; the standard for a single item is
+    # pack size 1, and the row says so in a note.
+    pack_result = item.get("pack_result") or {}
+    if (
+        item.get("group") == "B"
+        and proposals.get("standard_size") is not None
+        and proposals.get("standard_uom") is not None
+        and proposals.get("standard_pack_size") is None
+        and original.get("standard_pack_size") in (None, "")
+        and pack_result.get("status") in {"NOT_FOUND", "AGENT_DECLINED"}
+        and not pack_result.get("candidates")
+        and not (issue_codes & REVIEW_CODES)
+    ):
+        proposals["standard_pack_size"] = "1"
+        item.setdefault("field_provenance", {})["standard_pack_size"] = {
+            "method": "RULE", "rule_id": "SINGLE_ITEM_DEFAULT", "policy_version": RESULT_LEDGER_VERSION,
+        }
+        findings.append(_finding({
+            "code": "PACK_SIZE_SINGLE_ITEM", "field": "standard_pack_size", "severity": "INFO",
+            "message": (
+                "No pack count is written in any description or in the legacy data, so the "
+                "product is recorded as a single item: pack size 1."
+            ),
+            "current_value": None, "expected_value": "1",
+        }))
+        issue_codes.add("PACK_SIZE_SINGLE_ITEM")
 
     has_proposal = any(proposals.get(field) is not None for field in AUDIT_FIELDS)
     requires_review = bool(issue_codes & REVIEW_CODES)

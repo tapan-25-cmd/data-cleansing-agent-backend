@@ -221,3 +221,23 @@ def test_linked_suggestion_proposes_size_and_pack_together_for_review():
     assert result["field_provenance"]["standard_pack_size"]["rule_id"] == "LEGACY_LINKED_PACK"
     finding = next(f for f in result["findings"] if f["code"] == "LINKED_SIZE_AND_PACK_SUGGESTION")
     assert finding["proposed"]["standard_pack_size"] == "10"
+
+
+def test_a_converted_single_item_gets_pack_size_one_with_a_note():
+    source = item(proposals={"standard_size": "1000", "standard_uom": "GM", "standard_pack_size": None})
+    source.update({"group": "B", "reason_code": "RULE_CONVERSION",
+                   "original": {"standard_size": None, "standard_uom": None, "standard_pack_size": None, "legacy_size": "1", "legacy_uom": "KG"},
+                   "pack_result": {"status": "NOT_FOUND", "candidates": []}})
+    result = enrich_result_item(source)
+    assert result["field_proposals"]["standard_pack_size"] == "1"
+    assert result["field_provenance"]["standard_pack_size"]["rule_id"] == "SINGLE_ITEM_DEFAULT"
+    assert any(f["code"] == "PACK_SIZE_SINGLE_ITEM" for f in result["findings"])
+    assert result["application_policy"] == "AUTO_APPLY"
+
+
+def test_no_single_item_default_when_a_count_was_seen_or_a_review_is_open():
+    seen = item(proposals={"standard_size": "1000", "standard_uom": "GM", "standard_pack_size": None})
+    seen.update({"group": "B", "reason_code": "RULE_CONVERSION",
+                 "original": {"standard_size": None, "standard_uom": None, "standard_pack_size": None, "legacy_size": "1", "legacy_uom": "KG"},
+                 "pack_result": {"status": "AGENT_DECLINED", "candidates": [{"pack_size": "6"}]}})
+    assert enrich_result_item(seen)["field_proposals"]["standard_pack_size"] is None

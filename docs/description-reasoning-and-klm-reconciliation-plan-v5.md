@@ -446,3 +446,20 @@ described as a fact about the data, never as a tool failure); the products the t
 decide alone, grouped by reason with the products behind each group; then the plain-word steps.
 Group C's second reading is the known-answer test (353 of 370). Nothing on the page calls a
 value "confirmed" unless the product's own words or a second reading state it.
+
+### 16. Round-trip (idempotence) check and reader contract hardening (24 September 2026)
+
+Offline test: process the v0.2 workbook, export it, feed the export back in as input, process
+again (`scratchpad/roundtrip.py`, mock agent). Before the fix the export re-imported with 154
+rows in `DATA_SHAPE_ERROR`: Group B conversions whose pack count was never found were exported
+as size + unit with an empty pack size, an incomplete tuple the reader rejects. Fix
+(`result-ledger-v5`): a Group B conversion with no pack count written anywhere and no review
+open is recorded as a single item, pack size 1, with the note `PACK_SIZE_SINGLE_ITEM`. After the
+fix the export re-imports with 0 invalid rows and 0 automatic changes; the only rows still in
+Group B are the 7 whose size stayed empty pending a person. Group counts on the original file
+are unchanged (A 11,970 / B 512 / C 55 / disputed 5); 167 rows carry the new note.
+
+Reader contract (`provider.py`): a `pair_interpretations.conclusion` longer than 400 characters
+is trimmed instead of rejected, and a reason code that disagrees with the status is replaced by
+the one the status implies. Both used to cost a schema-repair retry (seen as ADK tracebacks in
+the server log on job 46faa97e, which still completed with 0 invalid responses).

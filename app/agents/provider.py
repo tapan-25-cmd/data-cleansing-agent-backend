@@ -158,7 +158,16 @@ class PairInterpretation(BaseModel):
     status: PairStatus
     product_meaning: str | None = Field(default=None, max_length=240)
     evidence: list[Evidence] = Field(default_factory=list)
-    conclusion: str = Field(min_length=1, max_length=400)
+    conclusion: str = Field(min_length=1)
+
+    @field_validator("conclusion", mode="before")
+    @classmethod
+    def clip_conclusion(cls, value: object) -> object:
+        # Explanations are for people; a long one is trimmed, never a reason to
+        # reject an otherwise valid reading and spend a second call.
+        if isinstance(value, str) and len(value) > 400:
+            return value[:397].rstrip() + "…"
+        return value
 
 
 class QuantityRelationship(BaseModel):
@@ -243,10 +252,9 @@ class InferenceResult(BaseModel):
         if (self.pack_size is None) != (self.pack_evidence is None):
             raise ValueError("pack size and pack evidence must be supplied together")
         expected_reason = _REASON_FOR_STATUS[self.status]
-        if self.reason_code is None:
-            self.reason_code = expected_reason  # type: ignore[assignment]
-        elif self.reason_code != expected_reason:
-            raise ValueError(f"{self.status} requires reason code {expected_reason}")
+        # The reason code is fully determined by the status. A model that fills it
+        # differently has not read anything wrong, so it is replaced, not rejected.
+        self.reason_code = expected_reason  # type: ignore[assignment]
         return self
 
 
