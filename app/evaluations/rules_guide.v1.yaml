@@ -567,7 +567,7 @@ accuracy_method:
   C:
     - "Start with every product the tool raised for a person: needs review, could not determine, or invalid values. {products} products."
     - "The question for this group: was raising it right? A raise is right when the data bears it out: sources that disagree, a value only one source suggests, nothing written anywhere, or a value that cannot be used."
-    - "Raises the data bears out: {flags} products. For a blank, a second, independent reading of the six description fields must also find nothing written."
+    - "Raises the data bears out: {flags} products. For a blank, a second, independent reading of the item and web descriptions (English and Chinese) must also find nothing written."
     - "Where the reasoning layer quoted words from the description that show Excel was right, the raise was not needed and counts against: {alarms} products."
     - "Where a size is written in the description but the tool left the row blank, it counts against: {wrong} products."
     - "Accuracy = right ÷ judged = {flags} ÷ ({flags} + {alarms} + {wrong}) = {right} ÷ {scored} = {accuracy}%. Every raised product is judged."

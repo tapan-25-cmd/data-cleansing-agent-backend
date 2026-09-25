@@ -33,7 +33,7 @@ from app.services.klm_reconciliation_service import KLMReconciliationService, Le
 from app.services.result_status import GROUP_NAMES, effective_status, outcome_group, route_label, route_of
 from app.services.rule_engine import RuleEngine
 
-ACCURACY_VERSION = "accuracy-v5"
+ACCURACY_VERSION = "accuracy-v6"
 TEXT_FIELDS = ("item_desc_eng", "item_desc_local_lang", "web_description_eng", "web_description_chi")
 FIELD_NAMES = {"item_desc_eng": "item description", "item_desc_local_lang": "item description (Chinese)",
                "web_description_eng": "web description", "web_description_chi": "web description (Chinese)"}
@@ -111,7 +111,7 @@ SETS: dict[str, list[dict[str, str]]] = {
         {"id": "c_blank_unit", "kind": "FLAG", "name": "Older unit not in the table",
          "reason": "A unit with no agreed conversion. Blank is the right answer until one is agreed."},
         {"id": "c_nothing_written", "kind": "FLAG", "name": "Nothing written to read",
-         "reason": "No description states a size, and a rule-based re-read of the same six fields finds none either."},
+         "reason": "No description states a size, and a rule-based re-read of the item and web descriptions (English and Chinese) finds none either."},
         {"id": "c_gap_review", "kind": "FLAG", "name": "Half-filled row: a missing value was not found",
          "reason": "The row had some of size, unit and pack. What could be found was filled; the rest was only suggested, or is written nowhere."},
         {"id": "c_unusable", "kind": "FLAG", "name": "A value in Excel cannot be used",
@@ -384,7 +384,7 @@ class AccuracyService:
                 return "c_missed", (f"text says “{ms[0][0].fragment}”" if ms else f"reasoning layer: {ai.get('explanation', '')[:160]}")
             if ai and ai.get("verdict") == "CANNOT_TELL":
                 return "c_nothing_written", "rule-based re-read found nothing written; the reasoning layer agreed"
-            return "c_nothing_written", "rule-based re-read of all six fields found nothing written"
+            return "c_nothing_written", "rule-based re-read of the item and web descriptions found nothing written"
         if route == "INCOMPLETE":
             missing = [str(f.get("human_reason") or "") for f in x.get("findings") or [] if f.get("code") in {"GAP_NOT_FOUND", "GAP_SUGGESTED"}]
             if missing:
