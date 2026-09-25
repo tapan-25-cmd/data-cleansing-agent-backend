@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     ai_timeout_seconds: float = 60
     gemini_api_key: SecretStr | None = None
     gemini_model: str | None = None
+    # A stronger model that judges samples of the worker's output; defaults to gemini_model.
+    judge_model: str | None = None
     pack_size_inference_enabled: bool = True
     discrepancy_ai_fallback_enabled: bool = False
     require_discrepancy_ack_before_export: bool = True

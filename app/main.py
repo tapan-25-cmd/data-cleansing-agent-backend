@@ -5,7 +5,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.agents.chat_coordinator import ChatCoordinator
 from app.agents.factory import create_inference_provider
-from app.api import chat, evaluations, export, jobs, quality, review, open_questions, rules, reasoning, accuracy, blind_test, shapes
+from app.agents.judge import create_judge_provider
+from app.api import chat, evaluations, export, jobs, quality, review, open_questions, rules, reasoning, accuracy, blind_test, shapes, sample_check
 from app.config import get_settings
 from app.repositories.mongo import MongoRepositories
 from app.rules.registry import load_default_registry
@@ -26,6 +27,13 @@ async def lifespan(app: FastAPI):
     app.state.repositories = repositories
     app.state.storage = file_storage
     app.state.registry = registry
+    app.state.settings = settings
+    try:
+        app.state.judge = create_judge_provider(settings)
+        app.state.judge_is_real = settings.ai_provider.strip().lower() != "mock"
+    except ValueError:
+        app.state.judge = None
+        app.state.judge_is_real = False
     inference_provider = create_inference_provider(settings)
     app.state.ai_reading_test = AiReadingTestService(
         repositories,
@@ -75,6 +83,7 @@ app.include_router(reasoning.router, prefix=settings.api_prefix)
 app.include_router(accuracy.router, prefix=settings.api_prefix)
 app.include_router(blind_test.router, prefix=settings.api_prefix)
 app.include_router(shapes.router, prefix=settings.api_prefix)
+app.include_router(sample_check.router, prefix=settings.api_prefix)
 
 
 @app.get("/health")

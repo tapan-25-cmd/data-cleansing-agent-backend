@@ -272,6 +272,12 @@ class MongoRepositories:
     def save_blind_test(self, document: dict[str, Any]) -> None:
         self.db.blind_tests.replace_one({"job_id": document["job_id"], "kind": document["kind"]}, {**document, "saved_at": now()}, upsert=True)
 
+    def save_sample_check(self, document: dict[str, Any]) -> None:
+        self.db.sample_checks.replace_one({"job_id": document["job_id"]}, {**document, "saved_at": now()}, upsert=True)
+
+    def sample_check(self, job_id: str) -> dict[str, Any] | None:
+        return public(self.db.sample_checks.find_one({"job_id": job_id}))
+
     def blind_tests(self, job_id: str) -> dict[str, dict[str, Any]]:
         return {d["kind"]: public(d) for d in self.db.blind_tests.find({"job_id": job_id})}
 
