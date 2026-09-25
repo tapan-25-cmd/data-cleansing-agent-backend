@@ -36,6 +36,11 @@ def test_the_figure_needs_enough_verdicts_and_leaves_cant_tell_beside_it():
 def test_the_request_asks_the_groups_question_and_shows_the_tool_action():
     kept = judge_request(row(1, "A", "NO_CHANGE"))
     assert kept.question == "KEEP" and kept.excel.size == "500" and kept.legacy.uom == "GM" and kept.tool.final.size is None
+    assert kept.category_kind == "UNKNOWN"
+    assert judge_request(row(1, "A", "NO_CHANGE"), {"mixed_categories": ["Sugar"]}).category_kind == "MIXED"
+    assert judge_request(row(1, "A", "NO_CHANGE"), {"liquid_categories": ["Sugar"]}).category_kind == "LIQUID"
+    # The tool's own ounce finding wins over the category-level profile.
+    assert judge_request(row(1, "A", "REVIEW_REQUIRED", findings=["OUNCE_MAY_BE_FLUID"]), {"liquid_categories": ["Sugar"]}).category_kind == "MIXED"
     changed = judge_request(row(2, "B", "AUTO_APPLY", proposals={"standard_size": "1000", "standard_uom": "GM", "standard_pack_size": None}))
     assert changed.question == "CHANGE" and changed.tool.final.size == "1000"
     raised = judge_request(row(3, "A", "REVIEW_REQUIRED", findings=["SIGNIFICANT_LEGACY_SIZE_MISMATCH"]))

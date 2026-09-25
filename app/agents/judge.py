@@ -21,8 +21,8 @@ from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
-JUDGE_PROMPT_VERSION = "uom-judge-v1"
-JUDGE_PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_judge_v1.md"
+JUDGE_PROMPT_VERSION = "uom-judge-v3"
+JUDGE_PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_judge_v3.md"
 JUDGE_APP_NAME = "uom_sample_judge"
 WORKER_USER_ID = "uom-judge-worker"
 
@@ -54,6 +54,7 @@ class JudgeRequest(BaseModel):
     descriptions: dict[str, str | None]
     category: str | None = None
     subcategory: str | None = None
+    category_kind: Literal["LIQUID", "MIXED", "UNKNOWN"] = "UNKNOWN"
     legacy: Values | None = None
     excel: Values
     tool: ToolAction

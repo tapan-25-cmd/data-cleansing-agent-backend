@@ -44,7 +44,8 @@ def _run(repos: MongoRepositories, provider, job_id: str, size: int, concurrency
             repos.save_sample_check({"job_id": job_id, "status": "RUNNING", "started_at": started, "done": done, "total": total})
 
         progress(0)
-        report = SampleCheckService(provider, concurrency).run(job_id, sampled, progress)
+        profile = ((repos.get_job(job_id) or {}).get("validation_policy") or {}).get("category_profile")
+        report = SampleCheckService(provider, concurrency, profile).run(job_id, sampled, progress)
         repos.save_sample_check({**report, "status": "READY", "size": size, "started_at": started, "finished_at": datetime.now(timezone.utc)})
     except Exception as exc:  # noqa: BLE001
         repos.save_sample_check({"job_id": job_id, "status": "FAILED", "error": f"{type(exc).__name__}: {exc}", "started_at": started})

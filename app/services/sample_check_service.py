@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable
 
 from app.agents.judge import JUDGE_PROMPT_VERSION, JudgeRequest, ToolAction, Values
 from app.services.job_comparison_service import outcome
+from app.services.lane_a_trial_service import category_kind
 from app.services.result_status import GROUP_NAMES, effective_status, outcome_group
 
 SAMPLE_CHECK_VERSION = "sample-check-v1"
@@ -67,7 +68,9 @@ def draw_sample(job_id: str, items: Iterable[dict[str, Any]], group: str, size: 
     return sorted(chosen, key=lambda r: _order_key(job_id, group, r))
 
 
-def judge_request(item: dict[str, Any]) -> JudgeRequest:
+def judge_request(item: dict[str, Any], profile: dict[str, Any] | None = None) -> JudgeRequest:
+    """What the judge sees for one row. ``profile`` is the job's category profile, which says
+    whether an ounce in this category is read as weight, fluid, or raised."""
     group = outcome_group(item)
     original = item.get("original") or {}
     context = item.get("context") or {}
@@ -79,6 +82,7 @@ def judge_request(item: dict[str, Any]) -> JudgeRequest:
             "item_brand_eng", "item_brand_local_lang", "item_desc_eng", "item_desc_local_lang",
             "web_description_eng", "web_description_chi")},
         category=context.get("category"), subcategory=context.get("subcategory"),
+        category_kind=_ounce_kind(item, profile),
         legacy=Values(size=_s(original.get("legacy_size")), uom=original.get("legacy_uom")) if original.get("legacy_uom") else None,
         excel=Values(size=_s(original.get("standard_size")), uom=original.get("standard_uom"), pack_size=_s(original.get("standard_pack_size"))),
         tool=ToolAction(
@@ -86,6 +90,17 @@ def judge_request(item: dict[str, Any]) -> JudgeRequest:
             label=result["status_label"], reason=result["comment"][:1200],
         ),
     )
+
+
+def _ounce_kind(item: dict[str, Any], profile: dict[str, Any] | None) -> str:
+    """How an ounce is read for this row: the tool's own finding when it made one (it reads
+    the product's finest category level), else the category-level profile."""
+    codes = {f.get("code") for f in item.get("findings") or []}
+    if "OUNCE_MAY_BE_FLUID" in codes:
+        return "MIXED"
+    if "OUNCE_READ_AS_FLUID" in codes:
+        return "LIQUID"
+    return category_kind(item, profile)
 
 
 def _s(value: object) -> str | None:
@@ -105,9 +120,10 @@ def figure(verdicts: Iterable[str]) -> dict[str, Any]:
 
 
 class SampleCheckService:
-    def __init__(self, provider: Any, max_concurrency: int = 5):
+    def __init__(self, provider: Any, max_concurrency: int = 5, category_profile: dict[str, Any] | None = None):
         self.provider = provider
         self.semaphore = asyncio.Semaphore(max_concurrency)
+        self.category_profile = category_profile
 
     async def judge_rows(self, items: list[dict[str, Any]], on_done: Callable[[int], None] = lambda n: None) -> list[dict[str, Any]]:
         done = 0
@@ -116,7 +132,7 @@ class SampleCheckService:
         async def one(index: int, item: dict[str, Any]) -> None:
             nonlocal done
             group = outcome_group(item)
-            request = judge_request(item)
+            request = judge_request(item, self.category_profile)
             entry: dict[str, Any] = {"row_number": item["row_number"], "item_no": item.get("item_no"), "group": group,
                                      "tool_label": request.tool.label, "tool_reason": request.tool.reason[:300]}
             try:
