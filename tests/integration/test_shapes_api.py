@@ -38,7 +38,7 @@ def test_the_sequence_document_is_served_and_every_diagram_is_mermaid():
     assert text.count("```mermaid") >= 10 and "sequenceDiagram" in text and "stateDiagram-v2" in text
     # The tables name every collection the code writes to.
     rules_doc = TestClient(app).get("/api/rules/accuracy-rules").json()
-    assert rules_doc["markdown"].startswith("# How the accuracy is calculated")
+    assert rules_doc["markdown"].startswith("# How we measure accuracy")
     assert TestClient(app).get("/api/rules/other").status_code == 404
     for collection in ("jobs", "job_items", "job_accuracy", "job_comparisons", "job_comparison_rows",
                        "open_question_answers", "blind_tests", "ai_reading_results", "agent_evaluations",
