@@ -5,7 +5,7 @@ from typing import Any, Iterable
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReplaceOne
 from pymongo.database import Database
 
-from app.services.result_status import GROUPS, STATUSES, STATUSES_OF_GROUP, status_query
+from app.services.result_status import GROUPS, STATUSES, STATUSES_OF_GROUP, group_query, status_query
 
 
 def now() -> datetime:
@@ -239,6 +239,10 @@ class MongoRepositories:
             "$nor": [status_query("NO_CHANGE"), status_query("SKIPPED")],
         }
         return list(self.db.job_items.find(query, projection).sort("row_number", ASCENDING))
+
+    def group_items(self, job_id: str, group: str) -> list[dict[str, Any]]:
+        """Complete rows of one outcome group (Group C is a few hundred rows)."""
+        return list(self.db.job_items.find({"job_id": job_id, **group_query(group)}, {"_id": 0}).sort("row_number", ASCENDING))
 
     def accuracy_items(self, job_id: str) -> list[dict[str, Any]]:
         """Every live row, narrow: what the accuracy sets need and nothing more."""

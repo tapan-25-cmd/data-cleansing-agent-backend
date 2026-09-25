@@ -556,7 +556,7 @@ accuracy_method:
     - "If the descriptions state a different weight or volume than the value kept, keeping it counts as wrong, because the description wins: {wrong} products."
     - "Otherwise compare with the older size field. If it holds the same value, the same whole pack, or the same value within label rounding, the product is consistent with another record: {consistent} products. This rules out a typo, not a shared mistake, so it is shown in a lighter shade."
     - "Products with no older field to compare and no quantity in the text cannot be checked: {unverified}. They are shown and left out."
-    - "Accuracy = right ÷ checked = ({confirmed} + {consistent}) ÷ ({confirmed} + {consistent} + {wrong}) = {right} ÷ {scored} = {accuracy}%."
+    - "No percentage is reported for this group. Agreeing with the older field is consistency, not proof: the existing values are what the agent is meant to clean, not the answer key. Whether they are correct is measured against the Merchandising Team's cleansing once it is in the Data Lake, per field, with a 95% target."
   B:
     - "Start with every product where the tool wrote K, L or M itself, whichever way it found the value: {products} products."
     - "The question for this group: was the change right?"

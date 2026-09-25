@@ -573,3 +573,29 @@ export's Group and How columns match the screen on every row. The live job 9ea8a
 by the earlier engine, so without the new checks) reads A 11,742 / B 496 / C 304 / Purged 758;
 accuracy A 99.9 % (12 kept against the description), B 100 % of 111 checkable, C 97.7 % (7
 raises not needed). A fresh run is needed to see the new checks on live data.
+
+## 20. The client's three measures on the Accuracy tab (25 September 2026)
+
+An email to Dr Khoo and Gulshan (24 September), passing on Eric's points, proposed three Release 1
+measures, reported separately, none treating the existing Standardize values as the answer:
+**A · Rule accuracy** on the corrected rows (the new value matches the arithmetic conversion of the
+legacy size, target 100% once rounding and fluid-ounce rules are confirmed), **B · Correctness** on
+the rows not flagged, against the Merchandising Team's cleansing once it is in the Data Lake (per
+field, 95% on unit size and on unit of measure), and **C · Flag precision** on the flagged rows
+(justified from the row's own fields). Their A, B and C are measures, not our groups: A is our
+Group B, B is our Groups A and B, C is our Group C.
+
+The email's figures come from run `c658c48e` (23 September, export v4, columns AE–AW). Every one
+of them reproduces exactly from that workbook and from `ClientMeasures` (382 exact, 36 + 32
+rounded, 38 unit label, 4 fluid ounce; 11,408 exact and 46 within one unit, 10,595 identical;
+413 of 438 reviews are legacy mismatches, 206 with a proposal; 494 flags, none without a comment,
+226 with a proposal). The tab computes them on the open run; on the latest run `98dac01a`: rule
+accuracy 502 of 502, flag precision 295 of 295, 11,438 "Already correct" match the legacy size
+(6 only as a fluid ounce), 483 are confirmed by their own description, and correctness waits for
+the benchmark.
+
+`client_measures_service.py` computes them inside the accuracy build (accuracy v5), with a product
+list behind every count (`m_*` sets). The tab shows each measure in the email's structure and
+wording beside our numbers, then our own checks. Group A no longer carries a percentage: agreeing
+with the legacy size is consistency, not proof. Open with the client: relabel "Already correct" as
+"Matches the legacy size", the rounding and fluid-ounce rules, and the benchmark's file format.

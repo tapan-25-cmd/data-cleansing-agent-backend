@@ -27,12 +27,13 @@ from collections import Counter, defaultdict
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
+from app.services.client_measures_service import ClientMeasures
 from app.services.discrepancy_service import extract_field_signals, matches_value
 from app.services.klm_reconciliation_service import KLMReconciliationService, LegacyRelationship
 from app.services.result_status import GROUP_NAMES, effective_status, outcome_group, route_label, route_of
 from app.services.rule_engine import RuleEngine
 
-ACCURACY_VERSION = "accuracy-v4"
+ACCURACY_VERSION = "accuracy-v5"
 TEXT_FIELDS = ("item_desc_eng", "item_desc_local_lang", "web_description_eng", "web_description_chi")
 FIELD_NAMES = {"item_desc_eng": "item description", "item_desc_local_lang": "item description (Chinese)",
                "web_description_eng": "web description", "web_description_chi": "web description (Chinese)"}
@@ -206,7 +207,12 @@ class AccuracyService:
         self.reconciler = KLMReconciliationService(engine)
         self.engine = engine
 
-    def build(self, items: Iterable[dict[str, Any]], reasoning_rows: Iterable[dict[str, Any]] = ()) -> dict[str, Any]:
+    def build(
+        self, items: Iterable[dict[str, Any]], reasoning_rows: Iterable[dict[str, Any]] = (),
+        raised_items: Iterable[dict[str, Any]] = (),
+    ) -> dict[str, Any]:
+        """``raised_items`` are the complete Group C rows, for the client's flag facts
+        (every flag has a comment), which need each row's findings and evidence."""
         items = list(items)
         reasoning = {r.get("row_number"): r for r in reasoning_rows}
         unit_by_cat: dict[str, Counter[str]] = defaultdict(Counter)
@@ -249,8 +255,13 @@ class AccuracyService:
                 "routes": [{"route": name, "products": count} for name, count in routes[group].most_common()],
                 "sets": rows,
             })
+        # The client's three measures, in their wording, beside ours.
+        measures, measure_lists, measure_witness = ClientMeasures(self.engine).build(items, raised_items, membership)
+        membership.update(measure_lists)
         return {
             "version": ACCURACY_VERSION,
+            "measures": measures,
+            "measure_witness": measure_witness,
             "reasoning_rows_used": len(reasoning),
             "reasoning_kept_rows_checked": reasoned_kept,
             "kind_labels": KIND_LABELS,

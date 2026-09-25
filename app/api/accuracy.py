@@ -25,7 +25,9 @@ def build_accuracy(repos: MongoRepositories, registry, job: dict, previous: dict
     trial = repos.latest_lane_a_trial(job["job_id"])
     rows = repos.lane_a_trial_rows(job["job_id"], trial["run_id"]) if trial else []
     try:
-        report = AccuracyService(RuleEngine(registry, 0)).build(repos.accuracy_items(job["job_id"]), rows)
+        report = AccuracyService(RuleEngine(registry, 0)).build(
+            repos.accuracy_items(job["job_id"]), rows, repos.group_items(job["job_id"], "C"),
+        )
         repos.save_job_accuracy({"job_id": job["job_id"], "status": "READY", "stamp": _stamp(job, trial),
                                  "report": report, "built_at": datetime.now(timezone.utc)})
     except Exception as exc:  # noqa: BLE001
@@ -33,6 +35,11 @@ def build_accuracy(repos: MongoRepositories, registry, job: dict, previous: dict
         repos.save_job_accuracy({"job_id": job["job_id"], "status": "FAILED", "error": f"{type(exc).__name__}: {exc}",
                                  "stamp": _stamp(job, trial), **({"report": previous["report"], "built_at": previous.get("built_at")} if previous and previous.get("report") else {})})
         raise
+
+
+def _public(report: dict) -> dict:
+    """The report without the per-row lists, which are served one set at a time."""
+    return {k: v for k, v in report.items() if k not in {"membership", "witness", "measure_witness"}}
 
 
 def _job(repos: MongoRepositories, job_id: str) -> dict:
@@ -71,11 +78,10 @@ def accuracy(job_id: str, request: Request, tasks: BackgroundTasks,
     if building:
         # While rebuilding, the previous report stays readable so the page never goes blank.
         if stored and stored.get("report"):
-            report = dict(stored["report"]); report.pop("membership", None); report.pop("witness", None)
+            report = _public(stored["report"])
             return JSONResponse(jsonable_encoder({"status": "READY", "rebuilding": True, "built_at": stored.get("built_at"), **report}))
         return JSONResponse({"status": "BUILDING"}, status_code=202)
-    report = dict(stored["report"])
-    report.pop("membership", None); report.pop("witness", None)
+    report = _public(stored["report"])
     return JSONResponse(jsonable_encoder({"status": "READY", "built_at": stored.get("built_at"),
                                           "reading_test": repos.latest_reading_test(job.get("original_file_name")), **report}))
 
@@ -85,12 +91,15 @@ def accuracy_set(job_id: str, set_id: str, repos: Annotated[MongoRepositories, D
                  page: int = 1, page_size: int = 50) -> dict:
     """The products behind one set, with their result and comment."""
     _job(repos, job_id)
-    if set_id not in {s["id"] for sets in SETS.values() for s in sets}:
+    measure = set_id.startswith("m_")
+    if not measure and set_id not in {s["id"] for sets in SETS.values() for s in sets}:
         raise HTTPException(404, "Unknown set")
     stored = repos.job_accuracy(job_id)
     if not stored or not stored.get("report"):
         raise HTTPException(409, "Accuracy is not built yet")
-    witness = stored["report"].get("witness") or {}
+    if measure and set_id not in (stored["report"].get("membership") or {}):
+        raise HTTPException(404, "Unknown set")
+    witness = stored["report"].get("measure_witness" if measure else "witness") or {}
     rows = list(stored["report"].get("membership", {}).get(set_id) or [])
     page = max(1, page)
     page_size = max(1, min(page_size, 200))

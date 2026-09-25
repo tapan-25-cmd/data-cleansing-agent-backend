@@ -90,4 +90,6 @@ def test_rules_guide_lists_flow_tables_and_versions():
     assert {"upload", "lane", "lane_a", "lane_b", "lane_c", "lane_incomplete", "ledger", "sort", "review", "export"} <= nodes
     assert all(a in nodes and b in nodes for a, b, *_ in guide["pipeline"]["edges"])
     assert guide["reasoning"]["status"] == "SHADOW" and len(guide["reasoning"]["policy"]) == 3
-    assert set(guide["accuracy_method"]) == {"A", "B", "C"} and all("{accuracy}" in "".join(v) for v in guide["accuracy_method"].values())
+    assert set(guide["accuracy_method"]) == {"A", "B", "C"} and all("{accuracy}" in "".join(guide["accuracy_method"][g]) for g in ("B", "C"))
+    # Group A reports counts, not a percentage: agreeing with the legacy size is not proof.
+    assert "{accuracy}" not in "".join(guide["accuracy_method"]["A"])

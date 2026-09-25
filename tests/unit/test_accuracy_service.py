@@ -138,6 +138,7 @@ def test_group_c_is_judged_on_whether_raising_was_right():
 def test_every_live_product_lands_in_exactly_one_set():
     items = [row(1, "A"), row(2, "SKIPPED_PURGED"), row(3, "A", application_policy="REVIEW_REQUIRED", findings=[{"code": "SOMETHING_NEW"}])]
     report = service().build(items)
-    placed = sorted(r for rows in report["membership"].values() for r in rows)
+    # Our sets partition the products; the client's measure lists (m_*) cut across them.
+    placed = sorted(r for key, rows in report["membership"].items() if not key.startswith("m_") for r in rows)
     assert placed == [1, 3]
     assert report["membership"]["c_other"] == [3]
