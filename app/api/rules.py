@@ -9,10 +9,22 @@ from app.services.rules_guide_service import build_guide
 
 router = APIRouter(prefix="/rules", tags=["rules"])
 
-SEQUENCE_DOC = "pipeline-sequence.md"
-# docs/ sits beside backend/ in the monorepo and beside app/ in the standalone backend repo.
+# Documents from docs/ that the app shows as tabs. docs/ sits beside backend/ in the
+# monorepo and beside app/ in the standalone backend repo.
+DOCUMENTS = {"sequence": "pipeline-sequence.md", "accuracy-rules": "accuracy-rules.md"}
 _HERE = Path(__file__).resolve()
 DOCS_DIRS = (_HERE.parents[3] / "docs", _HERE.parents[2] / "docs")
+
+
+def _document(name: str) -> dict:
+    file_name = DOCUMENTS.get(name)
+    if not file_name:
+        raise HTTPException(404, "Unknown document")
+    for folder in DOCS_DIRS:
+        path = folder / file_name
+        if path.is_file():
+            return {"path": f"docs/{file_name}", "markdown": path.read_text(encoding="utf-8")}
+    raise HTTPException(404, f"docs/{file_name} is not packaged with this server")
 
 
 @router.get("")
@@ -29,8 +41,10 @@ def rules_guide(
 @router.get("/sequence")
 def pipeline_sequence() -> dict:
     """The pipeline sequence document (docs/pipeline-sequence.md), for the Sequence tab."""
-    for folder in DOCS_DIRS:
-        path = folder / SEQUENCE_DOC
-        if path.is_file():
-            return {"path": f"docs/{SEQUENCE_DOC}", "markdown": path.read_text(encoding="utf-8")}
-    raise HTTPException(404, f"docs/{SEQUENCE_DOC} is not packaged with this server")
+    return _document("sequence")
+
+
+@router.get("/accuracy-rules")
+def accuracy_rules() -> dict:
+    """How accuracy is calculated (docs/accuracy-rules.md), for the Accuracy rules tab."""
+    return _document("accuracy-rules")
