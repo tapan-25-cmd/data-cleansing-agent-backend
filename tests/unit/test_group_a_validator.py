@@ -56,7 +56,7 @@ def test_canonical_positive_numeric_fields_are_valid_and_preserved():
     assert result.status == GroupAValidationStatus.VALID
     assert result.standard_size == Decimal("500.5")
     assert result.normalization_proposal()["standard_size"] == "500.5"
-    assert result.as_dict()["policy_version"] == "group-a-validation-v6"
+    assert result.as_dict()["policy_version"] == "group-a-validation-v7"
     assert len(result.as_dict()["alias_checksum"]) == 64
 
 
@@ -450,3 +450,43 @@ def test_nested_case_count_that_includes_excel_pack_size_is_not_a_note():
         web_description_chi="美味牌水浸吞拿魚三罐裝原箱16 X 185GM",
     ))
     assert "DESCRIPTION_PACK_COUNT_DIFFERS" not in issue_codes(result)
+
+
+def test_a_case_held_as_its_inner_pack_is_raised_not_kept():
+    # 240929: "5 CASE/6 X 90GM" held as 450 GM × 6 makes the unit a 5-pack of 90 GM (D1: one piece).
+    result = validator().validate(candidate(
+        legacy_size="450", legacy_uom="GM", standard_size="450", standard_uom="GM", standard_pack_size="6",
+        raw_standard_size=450, raw_standard_uom="GM", raw_standard_pack_size=6,
+        web_description_eng="FUKU* INSTANT NOODLE 5 CASE/6 X 90GM",
+    ))
+    assert result.status == GroupAValidationStatus.VALID  # the route stays; the finding raises it
+    issue = next(i for i in result.issues if i.code == "CASE_SIZE_IS_INNER_PACK")
+    assert issue.expected_value == "5 CASE/6 X 90GM" and "one piece" in issue.message
+    # The same wording held one piece at a time is kept.
+    kept = validator().validate(candidate(
+        legacy_size="90", legacy_uom="GM", standard_size="90", standard_uom="GM", standard_pack_size="6",
+        raw_standard_size=90, raw_standard_uom="GM", raw_standard_pack_size=6,
+        web_description_eng="FUKU* INSTANT NOODLE 5 CASE/6 X 90GM",
+    ))
+    assert "CASE_SIZE_IS_INNER_PACK" not in issue_codes(kept)
+
+
+def test_a_lone_count_that_contradicts_the_pack_size_is_raised_with_a_suggestion():
+    # KIWAMI DASHI\26 held as 8 GM × 1: 26 sachets recorded as one.
+    result = validator().validate(candidate(
+        legacy_size="8", legacy_uom="GM", standard_size="8", standard_uom="GM", standard_pack_size="1",
+        raw_standard_size=8, raw_standard_uom="GM", raw_standard_pack_size=1,
+        item_desc_eng="KIWAMI DASHI\\26",
+    ))
+    issue = next(i for i in result.issues if i.code == "DESCRIPTION_COUNT_SUGGESTS_PACK")
+    assert issue.proposed == {"standard_size": "8", "standard_uom": "GM", "standard_pack_size": "26"}
+    # A count that already equals the pack size, a count that is the EA size, and a count
+    # beside a stated size are left to the other checks.
+    for values in (
+        dict(standard_pack_size="26", raw_standard_pack_size=26, item_desc_eng="KIWAMI DASHI\\26"),
+        dict(legacy_size="20", legacy_uom="PC", standard_size="20", standard_uom="EA", raw_standard_size=20, raw_standard_uom="EA", item_desc_eng="SHIM RAMYUN\\20"),
+        dict(item_desc_eng="KIWAMI DASHI 8G\\26"),
+    ):
+        base = dict(legacy_size="8", legacy_uom="GM", standard_size="8", standard_uom="GM", standard_pack_size="1",
+                    raw_standard_size=8, raw_standard_uom="GM", raw_standard_pack_size=1)
+        assert "DESCRIPTION_COUNT_SUGGESTS_PACK" not in issue_codes(validator().validate(candidate(**{**base, **values})))

@@ -35,7 +35,7 @@ categories:
     group: pack_structure
     kind: REVIEW
     name: Description count differs from Excel pack size
-    codes: [DESCRIPTION_PACK_COUNT_DIFFERS]
+    codes: [DESCRIPTION_PACK_COUNT_DIFFERS, DESCRIPTION_COUNT_SUGGESTS_PACK]
     rule: >-
       The description states Excel's unit size next to a count that is not Excel's pack size,
       for example "CASE 25 X 120GM" against a pack size of 50. Nothing says which is current.
@@ -46,7 +46,7 @@ categories:
     group: pack_structure
     kind: REVIEW
     name: Package wording can be read two ways
-    codes: [PACKAGING_HIERARCHY_AMBIGUOUS]
+    codes: [PACKAGING_HIERARCHY_AMBIGUOUS, CASE_SIZE_IS_INNER_PACK]
     rule: >-
       The package wording supports more than one unit size and pack size, and Excel matches
       none of them, for example "5 CASE/10X90GM".

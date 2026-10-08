@@ -31,7 +31,7 @@ from app.services.klm_reconciliation_service import (
 )
 
 
-GROUP_A_VALIDATION_VERSION = "group-a-validation-v6"
+GROUP_A_VALIDATION_VERSION = "group-a-validation-v7"
 # (field name used for evidence, attribute on InputProduct)
 _DESCRIPTION_FIELDS = (
     ("item_desc_eng", "item_desc_eng"),
@@ -321,6 +321,23 @@ class GroupAValidator:
                 )
                 if matches:
                     supported_packaging_fields.add(expression.field)
+                    if set(matches) == {"OUTER_TOTAL"}:
+                        # D1: the unit size is one piece. `5 CASE/6 X 90GM` held as
+                        # 450 GM × 6 makes the unit a 5-pack of 90 GM; the total agrees,
+                        # but the representation is not one piece, so a person decides.
+                        piece = format(expression.measurement.normalize(), "f")
+                        issues.append(ValidationIssue(
+                            "CASE_SIZE_IS_INNER_PACK",
+                            expression.field,
+                            ValidationSeverity.WARNING,
+                            (
+                                f"Excel's unit size {checked_size} {canonical_uom} is a whole inner pack of "
+                                f"{expression.outer_count} × {piece} {canonical_uom} in “{expression.fragment}”; "
+                                "by the agreed rule the unit size is one piece. A person confirms the split."
+                            ),
+                            f"{checked_size} {canonical_uom} × {checked_pack}",
+                            expression.fragment,
+                        ))
                 else:
                     ambiguous_packaging = True
                     issues.append(ValidationIssue(
@@ -342,6 +359,16 @@ class GroupAValidator:
             issues.extend(self._pack_count_notes(
                 row.product, checked_size, canonical_uom, checked_pack,
             ))
+            # Only when nothing about the size or the pack has raised the row already: a linked
+            # suggestion or a legacy mismatch carries its own proposal for the same count.
+            already = {i.code for i in issues} & {
+                "LINKED_SIZE_AND_PACK_SUGGESTION", "SIGNIFICANT_LEGACY_SIZE_MISMATCH", "LEGACY_UOM_MISMATCH",
+                "DESCRIPTION_PACK_COUNT_DIFFERS", "CASE_SIZE_IS_INNER_PACK",
+            }
+            if not packaging_expressions and not already:
+                issues.extend(self._lone_count_suggestion(
+                    row.product, checked_size, canonical_uom, checked_pack,
+                ))
             issues.extend(self._description_warnings(
                 report,
                 checked_size,
@@ -550,6 +577,46 @@ class GroupAValidator:
             ))
             break  # one note per row is enough
         return notes
+
+    @staticmethod
+    def _lone_count_suggestion(
+        product: InputProduct,
+        standard_size: Decimal,
+        standard_uom: str,
+        standard_pack_size: Decimal,
+    ) -> list[ValidationIssue]:
+        """The descriptions give only a pack count in the workbook's own notation (`\\26`,
+        `\\4`) and no size, and the count is not Excel's pack size: KIWAMI DASHI\\26 held as
+        8 GM × 1 is 26 sachets recorded as one. Raised with the size kept and the count
+        suggested as the pack size; a person confirms."""
+        counts: dict[Decimal, list[str]] = {}
+        for field, attribute in _DESCRIPTION_FIELDS:
+            signals = extract_field_signals(field, getattr(product, attribute))
+            if signals.measurements:
+                return []  # a size in the text is judged by the other checks
+            for count in signals.counts:
+                if str(count.fragment).startswith("\\"):
+                    counts.setdefault(Decimal(count.value), []).append(f"{count.fragment} ({_FIELD_NAMES[field]})")
+        if len(counts) != 1:
+            return []
+        count = next(iter(counts))
+        if count <= Decimal("1") or count == standard_pack_size:
+            return []
+        if standard_uom == "EA" and count == standard_size and standard_pack_size == Decimal("1"):
+            return []  # 20 EA × 1 with `\\20` already holds the twenty pieces
+        size = format(standard_size.normalize(), "f")
+        pack = format(count.normalize(), "f")
+        return [ValidationIssue(
+            "DESCRIPTION_COUNT_SUGGESTS_PACK", "standard_pack_size", ValidationSeverity.WARNING,
+            (
+                f"The description counts {pack} (“{'; '.join(dict.fromkeys(counts[count]))}”) and states no size, "
+                f"while Excel has a pack size of {format(standard_pack_size.normalize(), 'f')}. "
+                f"Suggested {size} {standard_uom} × {pack}; a person confirms."
+            ),
+            f"{size} {standard_uom} × {format(standard_pack_size.normalize(), 'f')}",
+            "; ".join(dict.fromkeys(counts[count])),
+            proposed={"standard_size": size, "standard_uom": standard_uom, "standard_pack_size": pack},
+        )]
 
     @staticmethod
     def _description_confirmation(

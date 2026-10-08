@@ -6,7 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.agents.chat_coordinator import ChatCoordinator
 from app.agents.factory import create_inference_provider
 from app.agents.judge import create_judge_provider
-from app.api import chat, evaluations, export, jobs, quality, review, open_questions, rules, reasoning, accuracy, blind_test, shapes, sample_check
+from app.agents.klm_checker import create_klm_checker
+from app.agents.pack_reader import create_pack_reader
+from app.api import chat, evaluations, export, jobs, quality, review, open_questions, rules, reasoning, accuracy, blind_test, shapes, sample_check, sample_test, web_evidence, bc_image_blind_test, klm_blind_test
 from app.config import get_settings
 from app.repositories.mongo import MongoRepositories
 from app.rules.registry import load_default_registry
@@ -34,6 +36,14 @@ async def lifespan(app: FastAPI):
     except ValueError:
         app.state.judge = None
         app.state.judge_is_real = False
+    try:
+        app.state.pack_reader = create_pack_reader(settings)
+    except ValueError:
+        app.state.pack_reader = None
+    try:
+        app.state.klm_checker = create_klm_checker(settings)
+    except ValueError:
+        app.state.klm_checker = None
     inference_provider = create_inference_provider(settings)
     app.state.ai_reading_test = AiReadingTestService(
         repositories,
@@ -47,6 +57,13 @@ async def lifespan(app: FastAPI):
         inference_provider, registry, max_concurrency=settings.ai_max_concurrency,
         default_rounding_decimals=settings.default_rounding_decimals or 0,
     )
+    reasoner = None
+    if settings.reasoner_mode != "off" and settings.ai_provider.strip().lower() != "mock":
+        try:
+            from app.agents.reconcile import AdkReconcileProvider
+            reasoner = AdkReconcileProvider(settings)
+        except ValueError:
+            reasoner = None
     app.state.processor = JobProcessor(
         repositories,
         file_storage,
@@ -55,6 +72,10 @@ async def lifespan(app: FastAPI):
         settings.default_rounding_decimals,
         settings.ai_max_concurrency,
         settings.pack_size_inference_enabled,
+        reasoner=reasoner,
+        reasoner_mode=settings.reasoner_mode,
+        reasoner_max_rows=settings.reasoner_max_rows,
+        reasoner_concurrency=settings.reasoner_concurrency,
     )
     app.state.exporter = ExportService(repositories, file_storage)
     app.state.chat_coordinator = ChatCoordinator()
@@ -84,6 +105,10 @@ app.include_router(accuracy.router, prefix=settings.api_prefix)
 app.include_router(blind_test.router, prefix=settings.api_prefix)
 app.include_router(shapes.router, prefix=settings.api_prefix)
 app.include_router(sample_check.router, prefix=settings.api_prefix)
+app.include_router(sample_test.router, prefix=settings.api_prefix)
+app.include_router(web_evidence.router, prefix=settings.api_prefix)
+app.include_router(bc_image_blind_test.router, prefix=settings.api_prefix)
+app.include_router(klm_blind_test.router, prefix=settings.api_prefix)
 
 
 @app.get("/health")

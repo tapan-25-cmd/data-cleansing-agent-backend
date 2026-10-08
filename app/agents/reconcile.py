@@ -20,8 +20,8 @@ from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
-RECONCILE_PROMPT_VERSION = "uom-reconcile-v2"
-RECONCILE_PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_reconcile_v2.md"
+RECONCILE_PROMPT_VERSION = "uom-reconcile-v3"
+RECONCILE_PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_reconcile_v3.md"
 RECONCILE_APP_NAME = "uom_reconcile_trial"
 RECONCILE_AGENT_NAME = "uom_reconcile_agent"
 WORKER_USER_ID = "uom-reconcile-worker"
@@ -147,11 +147,12 @@ class AdkReconcileProvider:
         from google.adk.sessions import InMemorySessionService
         from google.genai import types
 
-        if not settings.gemini_api_key or not settings.gemini_model:
-            raise ValueError("GEMINI_API_KEY and GEMINI_MODEL are required")
+        model_id = settings.reasoner_model or settings.gemini_model
+        if not settings.gemini_api_key or not model_id:
+            raise ValueError("GEMINI_API_KEY and GEMINI_MODEL (or REASONER_MODEL) are required")
         prompt, self.prompt_sha256 = load_reconcile_prompt()
         client = genai.Client(api_key=settings.gemini_api_key.get_secret_value())
-        model = Gemini(model=settings.gemini_model, client=client, retry_options=types.HttpRetryOptions(attempts=3))
+        model = Gemini(model=model_id, client=client, retry_options=types.HttpRetryOptions(attempts=3))
         self.agent = LlmAgent(
             name=RECONCILE_AGENT_NAME,
             description="Reconciles size, unit and pack size across sources the way a product-data reviewer would.",
@@ -164,7 +165,7 @@ class AdkReconcileProvider:
             ),
             tools=[], mode="chat", include_contents="none",
         )
-        self.model_id = settings.gemini_model
+        self.model_id = model_id
         self.timeout_seconds = settings.ai_timeout_seconds
         self.session_service = InMemorySessionService()
         self.runner = Runner(app=App(name=RECONCILE_APP_NAME, root_agent=self.agent), session_service=self.session_service)

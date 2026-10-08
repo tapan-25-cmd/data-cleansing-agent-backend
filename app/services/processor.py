@@ -48,6 +48,7 @@ from app.services.rule_engine import RuleEngine
 from app.services.result_ledger_service import enrich_result_item
 from app.services.result_status import GROUPS, outcome_group
 from app.services.gap_fill_service import GapFillService
+from app.services.reasoning_stage import ReasoningStage
 from app.storage.local import LocalFileStorage
 
 logger = logging.getLogger(__name__)
@@ -194,6 +195,10 @@ class JobProcessor:
         default_rounding_decimals: int | None = None,
         ai_max_concurrency: int = 5,
         pack_size_inference_enabled: bool = True,
+        reasoner: Any = None,
+        reasoner_mode: str = "off",
+        reasoner_max_rows: int = 3000,
+        reasoner_concurrency: int | None = None,
     ):
         self.repositories = repositories
         self.storage = storage
@@ -211,6 +216,11 @@ class JobProcessor:
         self.quality_service = QualityService(registry)
         self.ai_max_concurrency = ai_max_concurrency
         self.pack_size_inference_enabled = pack_size_inference_enabled
+        # The reasoning layer reads the rows where a rule had to interpret a number.
+        self.reasoner = reasoner
+        self.reasoner_mode = reasoner_mode if reasoner is not None else "off"
+        self.reasoner_max_rows = reasoner_max_rows
+        self.reasoner_concurrency = reasoner_concurrency or ai_max_concurrency
 
     def process(self, job_id: str) -> None:
         try:
@@ -469,16 +479,43 @@ class JobProcessor:
             agent_calls_done += 1
             progress.advance(agent_calls_done)
 
-        if group_b_pack_candidates:
-            asyncio.run(self._infer_group_b_pack(
-                items, group_b_pack_candidates, agent_call_finished,
-            ))
-        if group_c:
-            asyncio.run(self._infer_group_c(items, group_c, agent_call_finished, profile))
+        # The pack reader and the description reader are independent: run them together.
+        async def read_descriptions() -> None:
+            await asyncio.gather(
+                self._infer_group_b_pack(items, group_b_pack_candidates, agent_call_finished)
+                if group_b_pack_candidates else asyncio.sleep(0),
+                self._infer_group_c(items, group_c, agent_call_finished, profile)
+                if group_c else asyncio.sleep(0),
+            )
+
+        if group_b_pack_candidates or group_c:
+            asyncio.run(read_descriptions())
 
         # Materialize a stable result contract only after deterministic and
         # agent phases have finished populating proposals and provenance.
-        items = [enrich_result_item(item) for item in items]
+        enriched = [enrich_result_item(item) for item in items]
+
+        # The reasoning layer: rows where a rule interpreted a number are read again with
+        # every source. Its decision is recorded on the row; in gate mode the ledger acts on it.
+        reasoning_stats: dict[str, Any] = {"mode": self.reasoner_mode, "triggered": 0, "reasoned": 0}
+        if self.reasoner_mode != "off":
+            stage = ReasoningStage(
+                self.reasoner, self.reasoner_mode, max_rows=self.reasoner_max_rows,
+                max_concurrency=self.reasoner_concurrency, category_profile=profile.as_dict(),
+            )
+            decisions, reasoning_stats = stage.run(
+                enriched,
+                on_start=lambda n: progress.start("REASONING", n),
+                on_done=progress.advance,
+            )
+            for index, decision in decisions.items():
+                items[index]["reasoner"] = decision
+                for k in ("input", "output"):
+                    self.ai_usage[f"reasoner_{k}_tokens"] += (decision.get("tokens") or {}).get(k, 0)
+                self.ai_usage["reasoner_calls"] += decision.get("outcome") != "UNAVAILABLE"
+            if decisions:
+                enriched = [enrich_result_item(item) for item in items]
+        items = enriched
 
         progress.start("CHECKING_DISCREPANCIES")
         discrepancies = 0
@@ -533,6 +570,7 @@ class JobProcessor:
             "route_b_pack_agent_proposed": counts["route_b_pack_agent_proposal"],
             "route_c_pack_deterministic_proposed": counts["route_c_pack_deterministic_proposal"],
             "route_c_pack_agent_proposed": counts["route_c_pack_agent_proposal"],
+            "reasoning": reasoning_stats,
         }
         if job.get("snapshot_label") == "v0.2":
             differences = {key: (stats[key], expected) for key, expected in EXPECTED_V02.items() if stats[key] != expected}

@@ -36,6 +36,10 @@ class MongoRepositories:
         self.db.open_question_answers.create_index("category", unique=True)
         self.db.job_accuracy.create_index("job_id", unique=True)
         self.db.blind_tests.create_index([("job_id", ASCENDING), ("kind", ASCENDING)], unique=True)
+        self.db.bc_image_blind_runs.create_index("job_id", unique=True)
+        self.db.bc_image_blind_rows.create_index(
+            [("job_id", ASCENDING), ("row_number", ASCENDING)], unique=True,
+        )
         self.db.lane_a_trials.create_index([("job_id", ASCENDING), ("saved_at", DESCENDING)])
         self.db.lane_a_trial_rows.create_index([("job_id", ASCENDING), ("run_id", ASCENDING), ("row_number", ASCENDING)], unique=True)
         self.db.job_comparisons.create_index(
@@ -272,11 +276,102 @@ class MongoRepositories:
     def save_blind_test(self, document: dict[str, Any]) -> None:
         self.db.blind_tests.replace_one({"job_id": document["job_id"], "kind": document["kind"]}, {**document, "saved_at": now()}, upsert=True)
 
+    def save_bc_image_blind_test(self, report: dict[str, Any]) -> None:
+        rows = report.get("rows") or []
+        run = {k: v for k, v in report.items() if k != "rows"}
+        self.db.bc_image_blind_runs.replace_one({"job_id": report["job_id"]}, {**run, "saved_at": now()}, upsert=True)
+        if rows:
+            self.db.bc_image_blind_rows.bulk_write([
+                ReplaceOne({"job_id": report["job_id"], "row_number": row["row_number"]}, row, upsert=True)
+                for row in rows
+            ], ordered=False)
+
+    def bc_image_blind_test(self, job_id: str) -> dict[str, Any] | None:
+        return public(self.db.bc_image_blind_runs.find_one({"job_id": job_id}))
+
+    def bc_image_blind_test_for_workbook(self, job_id: str) -> dict[str, Any] | None:
+        """Latest completed test for this upload, including an earlier/later run of the
+        same named workbook. This lets an already processed conversation export the
+        independently-run benchmark instead of an empty sheet."""
+        job = self.db.jobs.find_one({"job_id": job_id}, {"original_file_name": 1})
+        if not job:
+            return None
+        ids = [d["job_id"] for d in self.db.jobs.find(
+            {"original_file_name": job.get("original_file_name")}, {"job_id": 1},
+        )]
+        return public(self.db.bc_image_blind_runs.find_one(
+            {"job_id": {"$in": ids}, "status": "READY"}, sort=[("finished_at", DESCENDING)],
+        ))
+
+    def bc_image_blind_rows(self, job_id: str, skip: int = 0, limit: int = 100, group: str | None = None,
+                            verdict: str | None = None) -> tuple[list[dict[str, Any]], int]:
+        query: dict[str, Any] = {"job_id": job_id}
+        if group:
+            query["group"] = group
+        if verdict:
+            query["primary_comparison.verdict"] = verdict
+        total = self.db.bc_image_blind_rows.count_documents(query)
+        rows = self.db.bc_image_blind_rows.find(query, {"_id": 0}).sort("row_number", ASCENDING).skip(skip).limit(limit)
+        return list(rows), total
+
     def save_sample_check(self, document: dict[str, Any]) -> None:
         self.db.sample_checks.replace_one({"job_id": document["job_id"]}, {**document, "saved_at": now()}, upsert=True)
 
     def sample_check(self, job_id: str) -> dict[str, Any] | None:
         return public(self.db.sample_checks.find_one({"job_id": job_id}))
+
+    def save_sample_test(self, document: dict[str, Any]) -> None:
+        self.db.sample_tests.replace_one({"job_id": document["job_id"]}, {**document, "saved_at": now()}, upsert=True)
+
+    def sample_test(self, job_id: str) -> dict[str, Any] | None:
+        return public(self.db.sample_tests.find_one({"job_id": job_id}))
+
+    def save_klm_blind_test(self, document: dict[str, Any]) -> None:
+        self.db.klm_blind_tests.replace_one({"job_id": document["job_id"]}, {**document, "saved_at": now()}, upsert=True)
+
+    def klm_blind_test(self, job_id: str) -> dict[str, Any] | None:
+        return public(self.db.klm_blind_tests.find_one({"job_id": job_id}))
+
+    def set_klm_blind_answer(self, job_id: str, row_number: int, answer: str | None, comment: str) -> bool:
+        result = self.db.klm_blind_tests.update_one(
+            {"job_id": job_id, "rows.row_number": row_number},
+            {"$set": {"rows.$.person": {"answer": answer, "comment": comment, "at": now()}, "saved_at": now()}})
+        return result.matched_count == 1
+
+    def set_sample_test_answer(self, job_id: str, row_number: int, answer: str | None, reason: str) -> bool:
+        result = self.db.sample_tests.update_one(
+            {"job_id": job_id, "rows.row_number": row_number},
+            {"$set": {"rows.$.person": {"answer": answer, "reason": reason, "at": now()}, "saved_at": now()}})
+        return result.matched_count == 1
+
+    # What the retailer's website says about a product is a fact about the product, not about
+    # a job: one record per item number, reused by every run.
+    def web_lookup(self, item_no: str) -> dict[str, Any] | None:
+        return public(self.db.web_lookups.find_one({"item_no": item_no}))
+
+    def web_lookups(self, item_nos: list[str]) -> dict[str, dict[str, Any]]:
+        return {d["item_no"]: public(d) for d in self.db.web_lookups.find({"item_no": {"$in": item_nos}})}
+
+    def save_web_lookup(self, item_no: str, document: dict[str, Any]) -> None:
+        self.db.web_lookups.update_one({"item_no": item_no}, {"$set": {**document, "item_no": item_no, "saved_at": now()}}, upsert=True)
+
+    def found_online(self) -> list[str]:
+        return [d["item_no"] for d in self.db.web_lookups.find({"status": "FOUND"}, {"item_no": 1})]
+
+    def save_web_evidence(self, job_id: str, document: dict[str, Any]) -> None:
+        self.db.web_evidence.replace_one({"job_id": job_id, "item_no": document["item_no"]}, {**document, "job_id": job_id, "saved_at": now()}, upsert=True)
+
+    def web_evidence(self, job_id: str) -> list[dict[str, Any]]:
+        return [public(d) for d in self.db.web_evidence.find({"job_id": job_id}).sort("row_number", ASCENDING)]
+
+    def save_web_evidence_run(self, document: dict[str, Any]) -> None:
+        self.db.web_evidence_runs.replace_one({"job_id": document["job_id"]}, {**document, "saved_at": now()}, upsert=True)
+
+    def web_evidence_run(self, job_id: str) -> dict[str, Any] | None:
+        return public(self.db.web_evidence_runs.find_one({"job_id": job_id}))
+
+    def items_by_item_nos(self, job_id: str, item_nos: list[str]) -> list[dict[str, Any]]:
+        return list(self.db.job_items.find({"job_id": job_id, "item_no": {"$in": item_nos}}, {"_id": 0}).sort("row_number", ASCENDING))
 
     def blind_tests(self, job_id: str) -> dict[str, dict[str, Any]]:
         return {d["kind"]: public(d) for d in self.db.blind_tests.find({"job_id": job_id})}

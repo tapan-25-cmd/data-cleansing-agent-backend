@@ -59,7 +59,9 @@ def documents():
     findings = ([], [{"code": "ROUNDING_ONLY_VARIANCE"}],
                 [{"code": "ROUNDING_ONLY_VARIANCE"}, {"code": "LEGACY_UOM_MISMATCH"}],
                 [{"code": "PARTLY_FILLED_ROW"}, {"code": "GAP_NOT_FOUND"}],
-                [{"code": "DESCRIPTION_SIZE_DIFFERS"}])
+                [{"code": "DESCRIPTION_SIZE_DIFFERS"}],
+                [{"code": "REASONER_CONFIRMED"}], [{"code": "REASONER_DISAGREES"}],
+                [{"code": "REASONER_OPEN_DECISION"}], [{"code": "REASONER_UNSUPPORTED"}])
     proposals = ({"standard_size": None, "standard_uom": None}, {"standard_size": "500", "standard_uom": "ML"}, None)
     reasons = (None, "RULE_CONVERSION", "NO_RULE")
     for route, policy, finding, proposal, reason in product(routes, policies, findings, proposals, reasons):

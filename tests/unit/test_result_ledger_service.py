@@ -241,3 +241,20 @@ def test_no_single_item_default_when_a_count_was_seen_or_a_review_is_open():
                  "original": {"standard_size": None, "standard_uom": None, "standard_pack_size": None, "legacy_size": "1", "legacy_uom": "KG"},
                  "pack_result": {"status": "AGENT_DECLINED", "candidates": [{"pack_size": "6"}]}})
     assert enrich_result_item(seen)["field_proposals"]["standard_pack_size"] is None
+
+
+def test_a_counted_pack_is_suggested_for_review_and_not_written():
+    from app.services.result_ledger_service import enrich_result_item
+    item = enrich_result_item({
+        "route": "A",
+        "original": {"standard_size": 8, "standard_uom": "GM", "standard_pack_size": 1},
+        "field_proposals": {"standard_size": None, "standard_uom": None, "standard_pack_size": None},
+        "validation": {"issues": [{"code": "DESCRIPTION_COUNT_SUGGESTS_PACK", "field": "standard_pack_size",
+                                   "severity": "WARNING", "message": "counts 26",
+                                   "proposed": {"standard_size": "8", "standard_uom": "GM", "standard_pack_size": "26"}}]},
+        "review": {"overall_status": "NOT_REQUIRED", "field_decisions": {}},
+    })
+    assert item["application_policy"] == "REVIEW_REQUIRED"
+    assert item["field_proposals"]["standard_pack_size"] == "26" and item["field_proposals"]["standard_size"] is None
+    pack = next(c for c in item["changes"] if c["field"] == "standard_pack_size")
+    assert (pack["proposed"], pack["final"]) == ("26", 1)

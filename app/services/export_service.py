@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import logging
 from pathlib import Path, PurePosixPath
@@ -96,6 +97,11 @@ AUDIT_COLUMNS = (
 )
 STATUS_COLUMN = AUDIT_COLUMNS.index("Cleansing Status")
 
+# The website check: our value against the retailer's page text and pack photo. Filled only
+# for products that were checked; blank means not checked. Never touches K, L or M.
+WEB_COLUMNS = ("Our value vs website", "Page text", "Pack photo", "Why", "Product page", "Pack photo link", "Checked on")
+WEB_FILLS = {"MATCHES": "FFE6F4EA", "DIFFERS": "FFF4DEDE", "UNSETTLED": "FFFDF1D9"}
+
 # A background per status, matching the colours used on the Agent performance screen.
 STATUS_FILLS = {
     "INVALID": "FFF4DEDE",
@@ -105,6 +111,7 @@ STATUS_FILLS = {
     "REVIEW_REQUIRED": "FFFDF1D9",  # amber  - waiting for a person
     "UNRESOLVED": "FFF0EAFA",       # purple - left blank rather than guess
     "SKIPPED": "FFF1F3F5",          # grey   - purged, never processed
+    "WEB_MATCHES": "FFDDF3E4", "WEB_DIFFERS": "FFF7D6D6", "WEB_UNSETTLED": "FFFBEBC9",  # the website check: green, red, amber
 }
 
 _MEASURES = {"GM": "a weight", "ML": "a volume", "EA": "a count", "FT": "a length"}
@@ -123,7 +130,7 @@ STYLES_PATH = "xl/styles.xml"
 # we write. A job that was exported under an older version rebuilds on the next request
 # instead of handing back a stale file, which is how a fixed export used to stay
 # invisible to anyone who had already downloaded once.
-EXPORT_VERSION = "export-v6"
+EXPORT_VERSION = "export-v17"  # v17: one K L M blind test sheet per sample
 
 
 def _log_event(event: str, **fields: object) -> None:
@@ -199,7 +206,8 @@ def _worksheet_path(archive: ZipFile) -> str:
 
 
 def _set_cell(row: ET.Element, column: int, row_number: int, value: object, text: bool,
-              style: int | None = None) -> None:
+              style: int | None = None, link: str | None = None) -> None:
+    """``link`` writes a clickable HYPERLINK formula showing ``value``; no relationship part is needed."""
     reference = f"{_column_name(column)}{row_number}"
     cells = list(row.findall("s:c", NS))
     cell = next((candidate for candidate in cells if candidate.get("r") == reference), None)
@@ -211,7 +219,12 @@ def _set_cell(row: ET.Element, column: int, row_number: int, value: object, text
         cell.remove(child)
     if style is not None:
         cell.set("s", str(style))
-    if text:
+    if link:
+        cell.set("t", "str")
+        safe = str(link).replace('"', "%22")
+        ET.SubElement(cell, f"{{{SHEET_NS}}}f").text = f'HYPERLINK("{safe}","{str(value).replace(chr(34), "")}")'
+        ET.SubElement(cell, f"{{{SHEET_NS}}}v").text = str(value)
+    elif text:
         cell.set("t", "inlineStr")
         inline = ET.SubElement(cell, f"{{{SHEET_NS}}}is")
         ET.SubElement(inline, f"{{{SHEET_NS}}}t").text = str(value)
@@ -220,7 +233,45 @@ def _set_cell(row: ET.Element, column: int, row_number: int, value: object, text
         ET.SubElement(cell, f"{{{SHEET_NS}}}v").text = str(value)
 
 
+# Elements that must follow <hyperlinks> in a worksheet, in schema order.
+_AFTER_HYPERLINKS = ("printOptions", "pageMargins", "pageSetup", "headerFooter", "rowBreaks", "colBreaks", "customProperties",
+                     "cellWatches", "ignoredErrors", "smartTags", "drawing", "legacyDrawing", "legacyDrawingHF", "picture",
+                     "oleObjects", "controls", "webPublishItems", "tableParts", "extLst")
+
+
+def _add_hyperlinks(worksheet: ET.Element, worksheet_path: str, archive: ZipFile,
+                    links: list[tuple[str, str]]) -> tuple[str, bytes | None]:
+    """Real hyperlink objects (clickable in every viewer, no calculation needed): one
+    <hyperlink> per cell, each pointing at an external relationship of the sheet."""
+    name = PurePosixPath(worksheet_path).name
+    rels_path = f"xl/worksheets/_rels/{name}.rels"
+    if not links:
+        return rels_path, None
+    if rels_path in archive.namelist():
+        rels_text = archive.read(rels_path).decode("utf-8")
+    else:
+        rels_text = f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="{PACKAGE_REL_NS}"></Relationships>'
+    existing = {int(m) for m in re.findall(r'Id="rId(\d+)"', rels_text)}
+    next_id = max(existing, default=0) + 1
+    container = worksheet.find("s:hyperlinks", NS)
+    if container is None:
+        container = ET.Element(f"{{{SHEET_NS}}}hyperlinks")
+        children = list(worksheet)
+        index = next((i for i, child in enumerate(children) if child.tag.split("}")[-1] in _AFTER_HYPERLINKS), len(children))
+        worksheet.insert(index, container)
+    added = []
+    for ref, url in links:
+        rid = f"rId{next_id}"
+        next_id += 1
+        safe = url.replace("&", "&amp;").replace('"', "%22")
+        added.append(f'<Relationship Id="{rid}" Type="{DOC_REL_NS}/hyperlink" Target="{safe}" TargetMode="External"/>')
+        ET.SubElement(container, f"{{{SHEET_NS}}}hyperlink", {"ref": ref, f"{{{DOC_REL_NS}}}id": rid})
+    rels_text = rels_text.replace("</Relationships>", "".join(added) + "</Relationships>")
+    return rels_path, rels_text.encode("utf-8")
+
+
 _FILLS_COUNT = re.compile(r'<fills count="(\d+)">')
+_FONTS_COUNT = re.compile(r'<fonts count="(\d+)"[^>]*>')
 _CELL_XFS_COUNT = re.compile(r'<cellXfs count="(\d+)">')
 
 
@@ -252,9 +303,17 @@ def _add_status_styles(styles_xml: bytes) -> tuple[bytes, dict[str, int]]:
         for offset in range(added)
     ) + "</cellXfs>", 1)
 
-    return text.encode("utf-8"), {
-        status: first_style + offset for offset, status in enumerate(STATUS_FILLS)
-    }
+    styles = {status: first_style + offset for offset, status in enumerate(STATUS_FILLS)}
+    # A link style (blue, underlined) so hyperlink cells look like links.
+    fonts = _FONTS_COUNT.search(text)
+    if fonts and "</fonts>" in text:
+        font_id = int(fonts.group(1))
+        text = text.replace(fonts.group(0), fonts.group(0).replace(f'count="{font_id}"', f'count="{font_id + 1}"'), 1)
+        text = text.replace("</fonts>", '<font><u/><sz val="11"/><color rgb="FF0563C1"/><name val="Calibri"/><family val="2"/></font></fonts>', 1)
+        text = text.replace(f'<cellXfs count="{first_style + added}">', f'<cellXfs count="{first_style + added + 1}">', 1)
+        text = text.replace("</cellXfs>", f'<xf numFmtId="0" fontId="{font_id}" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>', 1)
+        styles["LINK"] = first_style + added
+    return text.encode("utf-8"), styles
 
 
 def _plain(value: object) -> str:
@@ -514,11 +573,29 @@ class ExportService:
 
     def _already_current(self, job: dict[str, object], job_id: str) -> bool:
         """True when the file on disk was built by this version of the exporter."""
-        return (
+        current = (
             job.get("status") == "EXPORTED"
             and job.get("export_version") == EXPORT_VERSION
             and self.storage.get_output_path(job_id).exists()
         )
+        if current and hasattr(self.repositories, "web_evidence_run"):
+            run = self.repositories.web_evidence_run(job_id) or {}
+            finished, exported = run.get("finished_at"), job.get("exported_at")
+            if finished and (exported is None or finished > exported):
+                return False
+        if current and hasattr(self.repositories, "bc_image_blind_test_for_workbook"):
+            run = self.repositories.bc_image_blind_test_for_workbook(job_id) or {}
+            finished, exported = run.get("finished_at"), job.get("exported_at")
+            if finished and (exported is None or finished > exported
+                             or job.get("image_blind_source_job_id") != run.get("job_id")):
+                return False
+        if current and hasattr(self.repositories, "klm_blind_test"):
+            # A test finished, or a reviewer's answer saved, after the export makes the file stale.
+            test = self.repositories.klm_blind_test(job_id) or {}
+            saved, exported = test.get("saved_at"), job.get("exported_at")
+            if test.get("status") == "READY" and saved and (exported is None or saved > exported):
+                return False
+        return current
 
     def prepare_export(self, job_id: str) -> None:
         job = self.repositories.get_job(job_id)
@@ -573,6 +650,11 @@ class ExportService:
                 audit_start = max(headers.values()) + 1
                 for offset, audit_header in enumerate(AUDIT_COLUMNS):
                     _set_cell(header, audit_start + offset, 1, audit_header, text=True)
+                web_start = audit_start + len(AUDIT_COLUMNS)
+                web_rows = {int(d["row_number"]): d for d in self.repositories.web_evidence(job_id)} if hasattr(self.repositories, "web_evidence") else {}
+                if web_rows:
+                    for offset, web_header in enumerate(WEB_COLUMNS):
+                        _set_cell(header, web_start + offset, 1, web_header, text=True)
                 timer.done(worksheet_path=worksheet_path, row_count=len(rows))
 
                 styles_bytes, status_styles = _add_status_styles(
@@ -583,6 +665,7 @@ class ExportService:
                 timer = _Timer("export.patch_cells", job_id=job_id)
                 patched_cells = 0
                 skipped_rows = 0
+                hyperlinks: list[tuple[str, str]] = []
                 for item in export_items:
                     review = item.get("review") or {}
                     if review.get("overall_status") == "REJECTED":
@@ -635,7 +718,26 @@ class ExportService:
                             ),
                         )
                         patched_cells += 1
-                last_column = _column_name(audit_start + len(AUDIT_COLUMNS) - 1)
+                    checked = web_rows.get(row_number)
+                    if checked:
+                        from app.services.web_evidence_service import evaluate  # noqa: PLC0415 - avoids an import cycle
+                        e = evaluate(checked)
+                        source = checked.get("source") or {}
+                        when = checked.get("checked_at")
+                        when_text = f"{when.strftime('%d %b %Y') if hasattr(when, 'strftime') else str(when)[:10]} · {source.get('site') or 'wellcome.com.hk'}"
+                        photos = source.get("image_urls") or []
+                        cells = [(e["status_label"], status_styles.get("WEB_" + e["status"]), None), (e["page_cell"], None, None),
+                                 (e["photo_cell"], None, None), (e["why"], None, None),
+                                 (source.get("page_url"), None, source.get("page_url")), (e.get("evidence_photo"), None, e.get("evidence_photo")),
+                                 (when_text, None, None)]
+                        for offset, (value, style, link) in enumerate(cells):
+                            if value:
+                                _set_cell(row, web_start + offset, row_number, value, text=True,
+                                          style=status_styles.get("LINK") if link else style)
+                            if link:
+                                hyperlinks.append((f"{_column_name(web_start + offset)}{row_number}", link))
+                            patched_cells += 1
+                last_column = _column_name(audit_start + len(AUDIT_COLUMNS) + (len(WEB_COLUMNS) if web_rows else 0) - 1)
                 dimension = worksheet.find("s:dimension", NS)
                 if dimension is not None:
                     dimension.set("ref", f"A1:{last_column}{max(rows)}")
@@ -647,7 +749,8 @@ class ExportService:
                     original = auto_filter.get("ref", "")
                     if ":" in original:
                         auto_filter.set("ref", f"{original.split(':')[0]}:{last_column}{max(rows)}")
-                timer.done(patched_cells=patched_cells, skipped_rows=skipped_rows)
+                rels_path, rels_bytes = _add_hyperlinks(worksheet, worksheet_path, input_archive, hyperlinks)
+                timer.done(patched_cells=patched_cells, skipped_rows=skipped_rows, hyperlinks=len(hyperlinks))
 
                 self.repositories.update_job(job_id, {"progress.stage": "SERIALIZING_WORKSHEET"})
                 timer = _Timer("export.serialize_worksheet", job_id=job_id)
@@ -665,9 +768,56 @@ class ExportService:
                     replacements = {worksheet_path: worksheet_bytes}
                     if status_styles:
                         replacements[STYLES_PATH] = styles_bytes
+                    if rels_bytes:
+                        replacements[rels_path] = rels_bytes
+                    # A finished sample test becomes its own sheet beside the data.
+                    sample_test = self.repositories.sample_test(job_id) if hasattr(self.repositories, "sample_test") else None
+                    extra: dict[str, bytes] = {}
+                    from app.services.sample_test_sheet import add_sheet  # noqa: PLC0415 - avoids an import cycle
+                    if sample_test and sample_test.get("status") == "READY":
+                        from app.services.sample_test_sheet import sheet_xml  # noqa: PLC0415 - avoids an import cycle
+                        parts = {name: replacements.get(name) or input_archive.read(name)
+                                 for name in ("xl/workbook.xml", "xl/_rels/workbook.xml.rels", "[Content_Types].xml")}
+                        extra = add_sheet(parts, sheet_xml(sample_test))
+                        replacements.update({k: v for k, v in extra.items() if k in parts})
+                    # Always expose the test in the delivered workbook. Before it is run,
+                    # the sheet states that clearly instead of silently disappearing.
+                    from app.services.bc_image_blind_sheet import SHEET_NAME as IMAGE_SHEET_NAME, sheet_xml as image_sheet_xml  # noqa: PLC0415
+                    if hasattr(self.repositories, "bc_image_blind_test_for_workbook"):
+                        image_run = self.repositories.bc_image_blind_test_for_workbook(job_id)
+                    else:
+                        image_run = self.repositories.bc_image_blind_test(job_id) if hasattr(self.repositories, "bc_image_blind_test") else None
+                    image_source_job = image_run.get("job_id") if image_run and image_run.get("status") == "READY" else None
+                    image_rows = self.repositories.bc_image_blind_rows(image_source_job, 0, 100000)[0] if image_source_job else []
+                    current_parts = {name: replacements.get(name) or input_archive.read(name)
+                                     for name in ("xl/workbook.xml", "xl/_rels/workbook.xml.rels", "[Content_Types].xml")}
+                    image_extra = add_sheet(current_parts, image_sheet_xml(image_run, image_rows),
+                                            sheet_name=IMAGE_SHEET_NAME, file_prefix="image_blind_test")
+                    replacements.update({k: v for k, v in image_extra.items() if k in current_parts})
+                    extra.update({k: v for k, v in image_extra.items() if k not in current_parts})
+                    # The K L M blind test is always a sheet, with the reviewer's Yes/No last. It is a
+                    # test of this run's own output, so only this run's test fills it; before one
+                    # has run, the sheet says so instead of being silently absent.
+                    from app.services.klm_blind_sheet import SHEET_NAME as KLM_SHEET_NAME, sheet_name as klm_sheet_name, sheet_xml as klm_sheet_xml  # noqa: PLC0415
+                    from app.services.klm_blind_test_service import sample_numbers as klm_samples  # noqa: PLC0415
+                    klm_test = self.repositories.klm_blind_test(job_id) if hasattr(self.repositories, "klm_blind_test") else None
+                    klm_ready = bool(klm_test and klm_test.get("status") == "READY")
+                    # One sheet per sample ("KLM Blind Test 1", "2", ...); a single "not run" sheet before any.
+                    klm_sheets = [(klm_sheet_name(n), klm_sheet_xml(klm_test, sample=n)) for n in klm_samples(klm_test)] if klm_ready else []
+                    for klm_name, klm_bytes in klm_sheets or [(KLM_SHEET_NAME, klm_sheet_xml(None))]:
+                        current_parts = {name: replacements.get(name) or input_archive.read(name)
+                                         for name in ("xl/workbook.xml", "xl/_rels/workbook.xml.rels", "[Content_Types].xml")}
+                        klm_extra = add_sheet(current_parts, klm_bytes, sheet_name=klm_name, file_prefix="klm_blind_test")
+                        replacements.update({k: v for k, v in klm_extra.items() if k in current_parts})
+                        extra.update({k: v for k, v in klm_extra.items() if k not in current_parts})
                     for entry in input_archive.infolist():
                         content = replacements.get(entry.filename) or input_archive.read(entry.filename)
                         output_archive.writestr(entry, content)
+                    for name, content in extra.items():
+                        if name not in replacements:
+                            output_archive.writestr(name, content)
+                    if rels_bytes and rels_path not in input_archive.namelist():
+                        output_archive.writestr(rels_path, rels_bytes)
                 timer.done(entry_count=len(input_archive.infolist()))
 
             self.repositories.update_job(job_id, {"progress.stage": "VALIDATING_OUTPUT"})
@@ -683,7 +833,8 @@ class ExportService:
             timer.done(storage_key=storage_key)
             self.repositories.update_job(job_id, {
                 "status": "EXPORTED", "output_storage_key": storage_key, "error": None,
-                "export_version": EXPORT_VERSION, "progress.stage": "EXPORTED",
+                "export_version": EXPORT_VERSION, "progress.stage": "EXPORTED", "exported_at": datetime.now(timezone.utc),
+                "image_blind_source_job_id": image_source_job,
             })
             export_timer.done(status="EXPORTED")
             return self.storage.get_output_path(job_id)

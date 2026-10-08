@@ -21,8 +21,8 @@ from app.config import Settings
 
 logger = logging.getLogger(__name__)
 
-JUDGE_PROMPT_VERSION = "uom-judge-v3"
-JUDGE_PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_judge_v3.md"
+JUDGE_PROMPT_VERSION = "uom-judge-v6"
+JUDGE_PROMPT_PATH = Path(__file__).with_name("prompts") / "uom_judge_v6.md"
 JUDGE_APP_NAME = "uom_sample_judge"
 WORKER_USER_ID = "uom-judge-worker"
 
@@ -155,21 +155,29 @@ class AdkJudgeProvider:
             tools=[], mode="chat", include_contents="none",
         )
         self.model_id = model_id
-        self.timeout_seconds = settings.ai_timeout_seconds
+        self.timeout_seconds = settings.judge_timeout_seconds
         self.session_service = InMemorySessionService()
         self.runner = Runner(app=App(name=JUDGE_APP_NAME, root_agent=self.agent), session_service=self.session_service)
         self._types = types
 
     async def judge(self, request: JudgeRequest) -> JudgeResponse:
+        """One schema repair for an invalid answer; up to two more tries, with a pause, for a
+        call that timed out or failed on the provider's side."""
         errors: list[str] = []
-        for attempt in (1, 2):
+        attempt = transient = 0
+        while True:
+            attempt += 1
             try:
-                return await self._once(request, attempt, errors)
+                return await self._once(request, min(attempt, 2), errors)
             except InvalidJudgeResponse as exc:
                 errors.append(str(exc))
-                if attempt == 2:
+                if len(errors) >= 2:
                     raise
-        raise InvalidJudgeResponse("unreachable")  # pragma: no cover
+            except Exception:  # noqa: BLE001 - timeouts and provider errors
+                transient += 1
+                if transient > 2:
+                    raise
+                await asyncio.sleep(5 * transient)
 
     async def _once(self, request: JudgeRequest, attempt: int, errors: list[str]) -> JudgeResponse:
         session_id = str(uuid4())

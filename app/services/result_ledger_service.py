@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from decimal import Decimal
 from typing import Any
 
+from app.services.discrepancy_service import extract_field_signals
 from app.services.guards import GUARD_REVIEW_CODES
+from app.services.reasoning_codes import REASONER_REVIEW_CODES, TRIGGER_CODES
 from app.services.routes import route_of
 
 
-RESULT_LEDGER_VERSION = "result-ledger-v6"
+RESULT_LEDGER_VERSION = "result-ledger-v10"
 AUDIT_FIELDS = ("standard_size", "standard_uom", "standard_pack_size")
 
 _FINDING_METADATA = {
@@ -35,6 +38,56 @@ _FINDING_METADATA = {
         "SOURCE_DISCREPANCY",
         "REVIEW",
         "The description's count differs from Excel's pack size",
+    ),
+    "DESCRIPTION_COUNT_SUGGESTS_PACK": (
+        "SOURCE_DISCREPANCY",
+        "REVIEW",
+        "The description counts the pieces; Excel's pack size differs; the count is suggested",
+    ),
+    "CASE_SIZE_IS_INNER_PACK": (
+        "PACKAGING_HIERARCHY",
+        "REVIEW",
+        "Excel's unit size is a whole inner pack, not one piece",
+    ),
+    "REASONER_CONFIRMED": (
+        "SOURCE_AGREEMENT",
+        "INFO",
+        "A second reading of every source confirmed the value",
+    ),
+    "REASONER_DISAGREES": (
+        "SOURCE_DISCREPANCY",
+        "REVIEW",
+        "A second reading of every source gives a different value",
+    ),
+    "REASONER_SUGGESTS": (
+        "SOURCE_DISCREPANCY",
+        "INFO",
+        "A second reading suggests a value",
+    ),
+    "REASONER_SUPPORTS_SUGGESTION": (
+        "SOURCE_AGREEMENT",
+        "INFO",
+        "A second reading supports the suggestion",
+    ),
+    "REASONER_OPEN_DECISION": (
+        "SOURCE_DISCREPANCY",
+        "REVIEW",
+        "The value written depends on an open business decision",
+    ),
+    "REASONER_UNSUPPORTED": (
+        "SOURCE_DISCREPANCY",
+        "REVIEW",
+        "A second reading could not support the value written",
+    ),
+    "TEXT_COUNT_DIFFERS_FROM_PACK": (
+        "PACKAGING_HIERARCHY",
+        "INFO",
+        "The name states a count that differs from the pack size written",
+    ),
+    "REASONER_CANNOT_TELL": (
+        "VALIDATION",
+        "INFO",
+        "A second reading could not settle it",
     ),
     "PACK_SIZE_SINGLE_ITEM": (
         "PACKAGING_HIERARCHY",
@@ -183,7 +236,7 @@ _FINDING_METADATA = {
     ),
 }
 
-REVIEW_CODES = GUARD_REVIEW_CODES | frozenset({
+REVIEW_CODES = GUARD_REVIEW_CODES | REASONER_REVIEW_CODES | frozenset({
     "SIGNIFICANT_LEGACY_SIZE_MISMATCH",
     "DESCRIPTION_SIZE_DIFFERS",
     "GAP_NOT_FOUND",
@@ -191,6 +244,8 @@ REVIEW_CODES = GUARD_REVIEW_CODES | frozenset({
     "UNUSABLE_VALUE",
     "LINKED_SIZE_AND_PACK_SUGGESTION",
     "DESCRIPTION_PACK_COUNT_DIFFERS",
+    "DESCRIPTION_COUNT_SUGGESTS_PACK",
+    "CASE_SIZE_IS_INNER_PACK",
     "LEGACY_UOM_MISMATCH",
     "PACKAGING_HIERARCHY_AMBIGUOUS",
     "BILINGUAL_DESCRIPTION_CONFLICT",
@@ -291,6 +346,90 @@ def _finding(issue: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _reasoner_message(prefix: str, reasoner: dict[str, Any]) -> str:
+    quotes = "; ".join(f"“{e.get('fragment')}”" for e in reasoner.get("evidence") or [] if e.get("fragment"))
+    return f"{prefix} {reasoner.get('explanation') or ''}".strip() + (f" Quoted: {quotes}." if quotes else "")
+
+
+def _apply_reasoner(decision: str, reasoner: dict[str, Any], findings: list[dict[str, Any]], issue_codes: set[str],
+                    proposals: dict[str, Any], original: dict[str, Any], item: dict[str, Any]) -> None:
+    """Add what the reasoning layer's outcome says to the row (gate mode). It never writes a
+    value: a DISAGREES raises the row with the AI's values as the suggestion, a SUGGESTS
+    offers them only on a row that is already raised."""
+    values = reasoner.get("values") or {}
+    raised = bool(issue_codes & REVIEW_CODES)
+
+    def suggest() -> None:
+        for field in ("standard_size", "standard_uom", "standard_pack_size"):
+            value = values.get(field)
+            if value is not None and proposals.get(field) is None and differs(value, original.get(field)):
+                proposals[field] = value
+                item.setdefault("field_provenance", {})[field] = {
+                    "method": "AI_REASONER", "rule_id": "REASONER", "policy_version": RESULT_LEDGER_VERSION,
+                }
+
+    def note(code: str, message: str) -> None:
+        findings.append(_finding({"code": code, "field": "standard_size", "message": message,
+                                  "expected_value": values.get("total") or values.get("standard_size")}))
+        issue_codes.add(code)
+
+    if decision == "CONFIRMED":
+        note("REASONER_CONFIRMED", _reasoner_message("A second reading of every source confirmed the value:", reasoner))
+    elif decision == "DISAGREES":
+        note("REASONER_DISAGREES", _reasoner_message("A second reading of every source gives a different value:", reasoner))
+        suggest()
+    elif decision == "OPEN_DECISION":
+        note("REASONER_OPEN_DECISION", _reasoner_message(
+            "The value written depends on an open business decision, so a person decides:", reasoner))
+        suggest()
+    elif decision == "UNSUPPORTED":
+        note("REASONER_UNSUPPORTED", _reasoner_message(
+            "A second reading could not support the value written, so a person decides:", reasoner))
+    elif decision == "AGREES_WITH_SUGGESTION" and raised:
+        note("REASONER_SUPPORTS_SUGGESTION", _reasoner_message("A second reading supports the suggestion:", reasoner))
+    elif decision == "SUGGESTS" and raised:
+        note("REASONER_SUGGESTS", _reasoner_message("A second reading suggests:", reasoner))
+        suggest()
+    elif decision == "CANNOT_TELL" and raised:
+        note("REASONER_CANNOT_TELL", _reasoner_message("A second reading could not settle it:", reasoner))
+
+
+_COUNT_FIELDS = ("item_desc_eng", "item_desc_local_lang", "web_description_eng", "web_description_chi")
+
+
+def _text_count_note(item: dict[str, Any], proposals: dict[str, Any], original: dict[str, Any],
+                     issue_codes: set[str]) -> dict[str, Any] | None:
+    """A trigger, not a verdict: on a row the tool writes (converted or completed), the item or
+    web description states one count that differs from the pack size being written. The
+    reasoning layer reads the row; the note alone changes nothing."""
+    if route_of(item) not in {"B", "INCOMPLETE"} or issue_codes & REVIEW_CODES:
+        return None
+    context = item.get("context") or {}
+    counts = {
+        Decimal(count.value)
+        for field in _COUNT_FIELDS
+        for count in extract_field_signals(field, context.get(field)).counts
+    }
+    if len(counts) != 1:
+        return None
+    count = next(iter(counts))
+    pack = proposals.get("standard_pack_size") or original.get("standard_pack_size") or "1"
+    size = proposals.get("standard_size") or original.get("standard_size")
+    unit = str(proposals.get("standard_uom") or original.get("standard_uom") or "").upper()
+    try:
+        pack_value, size_value = Decimal(str(pack)), Decimal(str(size)) if size not in (None, "") else None
+    except (ArithmeticError, ValueError):
+        return None
+    if count <= 1 or count == pack_value:
+        return None
+    if unit == "EA" and size_value == count and pack_value == 1:
+        return None  # 3 EA × 1 already holds the three pieces
+    stated = format(count.normalize(), "f")
+    return {"code": "TEXT_COUNT_DIFFERS_FROM_PACK", "field": "standard_pack_size",
+            "message": f"The name states a count of {stated}, while the pack size written is {format(pack_value.normalize(), 'f')}; a second reading checks which is right.",
+            "current_value": format(pack_value.normalize(), "f"), "expected_value": stated}
+
+
 def differs(proposed: Any, before: Any) -> bool:
     """Whether writing ``proposed`` would change the cell. Numbers compare as numbers
     (500 and 500.0 are the same cell); text exactly, so "ml" → "ML" is a change."""
@@ -313,6 +452,17 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
     issue_codes |= {finding["code"] for finding in discrepancy_findings}
     proposals = item.setdefault("field_proposals", {})
     original = item.get("original") or {}
+
+    # The reasoning layer, when its outcomes act (gate mode). CONFIRMED means it stands behind
+    # the value the row holds, with quoted evidence and no open business rule: the rule
+    # interpretations it answered no longer raise the row; they stay on its record for audit.
+    reasoner = item.get("reasoner") or {}
+    decision = reasoner.get("outcome") if reasoner.get("mode") == "gate" else None
+    if decision == "CONFIRMED":
+        reasoner["resolved"] = sorted(issue_codes & TRIGGER_CODES)
+        issues = [issue for issue in issues if issue.get("code") not in TRIGGER_CODES]
+        findings = [finding for finding in findings if finding["code"] not in TRIGGER_CODES]
+        issue_codes -= TRIGGER_CODES
 
     # A material legacy mismatch is a proposal for a human, never an automatic
     # overwrite. The expected value was produced by the versioned rule engine.
@@ -345,6 +495,20 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
             "policy_version": RESULT_LEDGER_VERSION,
         }
 
+    # A description that only counts the pieces suggests the pack size; the size stays.
+    counted = next((
+        issue for issue in issues
+        if issue.get("code") == "DESCRIPTION_COUNT_SUGGESTS_PACK" and issue.get("proposed")
+    ), None)
+    if counted and proposals.get("standard_pack_size") is None:
+        proposals["standard_pack_size"] = dict(counted["proposed"])["standard_pack_size"]
+        item.setdefault("field_provenance", {})["standard_pack_size"] = {
+            "method": "RULE", "rule_id": "DESCRIPTION_COUNT", "policy_version": RESULT_LEDGER_VERSION,
+        }
+
+    if decision:
+        _apply_reasoner(decision, reasoner, findings, issue_codes, proposals, original, item)
+
     # A Group B conversion that found no pack count anywhere is a single item. Writing
     # it as size + unit with the pack size blank would be an incomplete tuple that the
     # workbook's own rules reject on the next read; the standard for a single item is
@@ -373,6 +537,11 @@ def enrich_result_item(source: dict[str, Any]) -> dict[str, Any]:
             "current_value": None, "expected_value": "1",
         }))
         issue_codes.add("PACK_SIZE_SINGLE_ITEM")
+
+    count_note = _text_count_note(item, proposals, original, issue_codes)
+    if count_note:
+        findings.append(_finding(count_note))
+        issue_codes.add(count_note["code"])
 
     has_proposal = any(proposals.get(field) is not None for field in AUDIT_FIELDS)
     # Group B is a change to K, L or M. A proposal equal to what Excel has changes nothing.

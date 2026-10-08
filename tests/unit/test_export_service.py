@@ -76,7 +76,9 @@ def test_export_applies_pending_proposals_without_rebuilding_workbook(tmp_path):
     assert output_sheet.cell(3, output_headers[FIELD_MAP["standard_size"]]).value == 500.5
     assert output_sheet.cell(3, output_headers[FIELD_MAP["standard_uom"]]).value == "ML"
     assert output_sheet.cell(3, output_headers[FIELD_MAP["standard_pack_size"]]).value == 1
-    assert result.sheetnames == [INPUT_SHEET]
+    assert result.sheetnames == [INPUT_SHEET, "Image Blind Test", "KLM Blind Test"]
+    assert result["KLM Blind Test"]["A1"].value == "K L M blind test · not run"
+    assert result["Image Blind Test"]["A1"].value == "B/C Image Blind Test · Not run"
     assert set(AUDIT_COLUMNS).issubset(output_headers)
     assert output_sheet.cell(2, output_headers["Cleansing Status"]).value == "Already correct"
     assert output_sheet.cell(2, output_headers["Group"]).value == "A"

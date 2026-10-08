@@ -93,6 +93,7 @@ def test_processor_routes_rules_and_ai_without_crossing_paths(tmp_path: Path):
         "route_b_pack_agent_proposed": 0,
         "route_c_pack_deterministic_proposed": 0,
         "route_c_pack_agent_proposed": 0,
+        "reasoning": {"mode": "off", "triggered": 0, "reasoned": 0},
     }
     by_item = {item["item_no"]: item for item in repository.items}
     assert by_item["000003"]["method"] == "RULE"
@@ -642,3 +643,58 @@ def test_a_half_filled_row_is_completed_where_the_values_are_found_and_raised_wh
     assert (suggested["proposed"], suggested["final"]) == ("1000", None)
     assert repository.job["stats"]["groups"] == {"A": 0, "B": 5, "C": 4, "PURGED": 0}
     assert repository.job["stats"]["route_incomplete"] == 8
+
+
+def test_the_reasoning_layer_reads_interpreted_rows_and_acts_only_in_gate_mode(tmp_path: Path):
+    from decimal import Decimal
+    from app.agents.reconcile import Evidence, Proposed, ReconcileResponse, ReconcileResult
+
+    class Reasoner:
+        model_id = "fake"
+
+        def __init__(self):
+            self.requests = []
+
+        async def reconcile(self, request):
+            self.requests.append(request)
+            result = ReconcileResult(product_unit="one tub", verdict="EXCEL_RIGHT",
+                                     proposed=Proposed(standard_size=Decimal("100"), standard_uom="GM", standard_pack_size=Decimal("1")),
+                                     explanation="3.3G is the protein figure.", evidence=[Evidence(field="item_desc_eng", fragment="YOGHURT")],
+                                     confidence="HIGH")
+            return ReconcileResponse(result, "fake", "uom-reconcile-v3", "x", 1, 10, 5, 1)
+
+    rows = [
+        {"Item_no": "1", "Department": "03_Grocery 2", "item_desc_eng": "3.3G YOGHURT", "item_size_value": 100, "item_size_unit": "GM",
+         "Standardize Unit Size": 100, "Standardize UOM": "GM", "Standardize Pack Size": 1},
+        {"Item_no": "2", "Department": "03_Grocery 2", "item_desc_eng": "PLAIN YOGHURT", "item_size_value": 100, "item_size_unit": "GM",
+         "Standardize Unit Size": 100, "Standardize UOM": "GM", "Standardize Pack Size": 1},
+    ]
+
+    def run(mode, folder):
+        storage = LocalFileStorage(folder / "files", 10_000_000)
+        fixture = folder / "fixture.xlsx"
+        workbook = Workbook(); sheet = workbook.active; sheet.title = INPUT_SHEET
+        headers = sorted(set(FIELD_MAP.values()) | PURGE_HEADERS); sheet.append(headers)
+        for values in rows:
+            sheet.append([values.get(h) for h in headers])
+        workbook.save(fixture)
+        with fixture.open("rb") as source:
+            storage.save_input("abc123", source)
+        repository = FakeRepositories({"job_id": "abc123", "selected_departments": ["03_Grocery 2"], "snapshot_label": None})
+        reasoner = Reasoner()
+        JobProcessor(repository, storage, load_default_registry(), MockInferenceProvider(), reasoner=reasoner, reasoner_mode=mode).process("abc123")
+        return repository, reasoner
+
+    shadow, reasoner = run("shadow", tmp_path / "s")
+    assert len(reasoner.requests) == 1, "only the row where a rule interpreted a number is read"
+    by = {i["item_no"]: i for i in shadow.items}
+    assert by["1"]["reasoner"]["outcome"] == "CONFIRMED" and by["1"]["application_policy"] == "REVIEW_REQUIRED"
+    assert "reasoner" not in by["2"]
+    assert shadow.job["stats"]["reasoning"]["outcomes"] == {"CONFIRMED": 1}
+    assert shadow.job["ai_usage"]["reasoner_calls"] == 1
+
+    gated, _ = run("gate", tmp_path / "g")
+    item = next(i for i in gated.items if i["item_no"] == "1")
+    assert item["application_policy"] == "OBSERVATION_ONLY"
+    assert {f["code"] for f in item["findings"]} >= {"REASONER_CONFIRMED"}
+    assert gated.job["stats"]["groups"]["C"] == 0

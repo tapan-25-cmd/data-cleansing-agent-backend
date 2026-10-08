@@ -40,7 +40,8 @@ FIELD_NAMES = {"item_desc_eng": "item description", "item_desc_local_lang": "ite
 DIM = {"GM": "WEIGHT", "ML": "VOLUME"}
 AMBIGUOUS_LEGACY_UNITS = {"OZ", "FZ", "FL OZ", "FLOZ"}
 CONFLICT_CODES = {"DESCRIPTION_PACK_COUNT_DIFFERS", "DESCRIPTION_SIZE_DIFFERS", "BILINGUAL_DESCRIPTION_CONFLICT",
-                  "PACK_COUNT_CONFLICT", "PACKAGING_HIERARCHY_AMBIGUOUS"}
+                  "PACK_COUNT_CONFLICT", "PACKAGING_HIERARCHY_AMBIGUOUS", "DESCRIPTION_COUNT_SUGGESTS_PACK",
+                  "CASE_SIZE_IS_INNER_PACK"}
 QUESTIONS = {
     "A": "Was keeping the values right?",
     "B": "Was the change right?",
